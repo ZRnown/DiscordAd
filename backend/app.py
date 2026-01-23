@@ -3,7 +3,7 @@ Flask API 应用 - Discord 自动营销机器人系统
 
 提供 REST API 接口：
 - 账号管理 (CRUD + 启动/停止)
-- 店铺管理 (CRUD + 抓取)
+- 内容管理 (CRUD + 图片上传)
 - 自动发送任务控制
 """
 import asyncio
@@ -12,9 +12,12 @@ import logging
 import re
 import requests
 import sqlite3
+import os
+import json
 from typing import Dict, List, Optional
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
+from werkzeug.utils import secure_filename
 
 from config import config
 from database import Database
@@ -27,7 +30,6 @@ from auto_sender import (
     resume_sending_task,
     load_task_state
 )
-from weidian_scraper import WeidianScraper, save_cookie_string
 from license_manager import activate_license, clear_license, validate_local_license
 
 # 配置日志
@@ -328,148 +330,6 @@ def stop_account(account_id):
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-# ============== 店铺管理 API ==============
-
-@app.route('/api/shops', methods=['GET'])
-def get_shops():
-    """获取所有店铺"""
-    try:
-        shops = db.get_all_shops()
-        return jsonify({'success': True, 'shops': shops})
-    except Exception as e:
-        logger.error(f"获取店铺列表失败: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/shops', methods=['POST'])
-def add_shop():
-    """添加新店铺"""
-    try:
-        data = request.get_json()
-        shop_id = data.get('shop_id', '').strip()
-        name = data.get('name', '').strip()
-
-        if not shop_id:
-            return jsonify({'success': False, 'error': '店铺ID不能为空'}), 400
-
-        if not name:
-            scraper = WeidianScraper()
-            fetched_name = scraper.get_shop_name_by_shop_id(shop_id)
-            name = fetched_name if fetched_name and fetched_name != '未知店铺' else f"店铺{shop_id}"
-
-        result_id = db.add_shop(shop_id=shop_id, name=name)
-        if result_id is None:
-            return jsonify({'success': False, 'error': '店铺已存在'}), 400
-        return jsonify({'success': True, 'id': result_id, 'message': '店铺添加成功'})
-    except Exception as e:
-        logger.error(f"添加店铺失败: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/shops/<int:shop_id>', methods=['DELETE'])
-def delete_shop(shop_id):
-    """删除店铺"""
-    try:
-        db.delete_shop(shop_id)
-        return jsonify({'success': True, 'message': '店铺已删除'})
-    except Exception as e:
-        logger.error(f"删除店铺失败: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/shops/<int:shop_id>/scrape', methods=['POST'])
-def scrape_shop(shop_id):
-    """抓取店铺商品"""
-    try:
-        shop = db.get_shop_by_id(shop_id)
-        if not shop:
-            return jsonify({'success': False, 'error': '店铺不存在'}), 404
-
-        # 启动抓取任务（在后台线程）
-        def scrape_task():
-            try:
-                scraper = WeidianScraper()
-                shop_name = shop.get('name') or ''
-                if not shop_name or shop_name.startswith('店铺') or shop_name == '未知店铺':
-                    fetched_name = scraper.get_shop_name_by_shop_id(shop['shop_id'])
-                    if fetched_name and fetched_name != '未知店铺':
-                        shop_name = fetched_name
-                        db.update_shop_name(shop['id'], shop_name)
-
-                item_ids = scraper.fetch_shop_item_ids(shop['shop_id'])
-                if not item_ids:
-                    logger.info(f"店铺 {shop['shop_id']} 未获取到商品，请检查Cookies或店铺ID")
-                    db.update_shop_product_count(shop['shop_id'], 0)
-                    return
-
-                for item_id in item_ids:
-                    product_url = f"https://weidian.com/item.html?itemID={item_id}"
-                    product_data = {
-                        'product_url': product_url,
-                        'item_id': item_id,
-                        'cnfans_url': f"https://cnfans.com/product?id={item_id}&platform=WEIDIAN",
-                        'acbuy_url': (
-                            "https://www.acbuy.com/product?url="
-                            f"https%253A%252F%252Fweidian.com%252Fitem.html%253FitemID%253D{item_id}"
-                            f"%2526spider_token%253D43fe&id={item_id}&source=WD"
-                        ),
-                        'shop_name': shop_name or shop.get('shop_id')
-                    }
-                    db.insert_product(product_data)
-
-                db.update_shop_product_count(shop['shop_id'], len(item_ids))
-                logger.info(f"店铺 {shop_name or shop['shop_id']} 抓取完成，共 {len(item_ids)} 个商品")
-            except Exception as e:
-                logger.error(f"抓取店铺失败: {e}")
-
-        thread = threading.Thread(target=scrape_task, daemon=True)
-        thread.start()
-
-        return jsonify({'success': True, 'message': '抓取任务已启动'})
-    except Exception as e:
-        logger.error(f"启动抓取失败: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/scrape/shop/status', methods=['GET'])
-def scrape_shop_status():
-    """抓取任务状态占位（兼容旧前端）"""
-    return jsonify({'success': True, 'running': False})
-
-
-@app.route('/api/shops/<int:shop_id>/products', methods=['GET'])
-def get_shop_products(shop_id):
-    """获取店铺的所有商品"""
-    try:
-        shop = db.get_shop_by_id(shop_id)
-        if not shop:
-            return jsonify({'success': False, 'error': '店铺不存在'}), 404
-
-        products = db.get_products_by_shop(shop['name'])
-        return jsonify({'success': True, 'products': products})
-    except Exception as e:
-        logger.error(f"获取商品列表失败: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-
-@app.route('/api/products', methods=['GET'])
-def get_products():
-    """商品列表占位（兼容旧前端）"""
-    try:
-        page = int(request.args.get('page', 1))
-        limit = int(request.args.get('limit', 50))
-    except ValueError:
-        page = 1
-        limit = 50
-    return jsonify({'success': True, 'products': [], 'page': page, 'limit': limit, 'total': 0})
-
-
-@app.route('/api/products/count', methods=['GET'])
-def get_products_count():
-    """商品数量占位（兼容旧前端）"""
-    return jsonify({'success': True, 'count': 0})
-
-
 # ============== 自动发送任务 API ==============
 
 @app.route('/api/sender/start', methods=['POST'])
@@ -477,29 +337,32 @@ def start_sender():
     """启动自动发送任务"""
     try:
         data = request.get_json()
-        shop_id = data.get('shopId')
-        channel_ids = data.get('channelIds')
-        if channel_ids is None:
-            channel_ids = data.get('channelId')
+        content_ids = data.get('contentIds', [])
         account_ids = data.get('accountIds', [])
+        channel_ids = data.get('channelIds', [])
+        rotation_mode = data.get('rotationMode', True)  # 默认轮换模式
         interval = data.get('interval', config.DEFAULT_SEND_INTERVAL)
 
         # 参数验证
-        if not shop_id:
-            return jsonify({'success': False, 'error': '请选择店铺'}), 400
-        channel_ids = _parse_channel_ids(channel_ids)
-        if not channel_ids:
-            return jsonify({'success': False, 'error': '请输入目标频道ID'}), 400
+        if not content_ids:
+            return jsonify({'success': False, 'error': '请选择至少一条内容'}), 400
         if not account_ids:
             return jsonify({'success': False, 'error': '请选择至少一个账号'}), 400
+        if not channel_ids:
+            return jsonify({'success': False, 'error': '请输入至少一个频道ID'}), 400
+
+        # 非轮换模式只能选择一个账号
+        if not rotation_mode and len(account_ids) > 1:
+            return jsonify({'success': False, 'error': '单账号模式只能选择一个账号'}), 400
 
         # 验证间隔范围
         interval = max(config.MIN_SEND_INTERVAL, min(interval, config.MAX_SEND_INTERVAL))
 
         result = start_sending_task(
-            shop_id=int(shop_id),
-            channel_ids=channel_ids,
+            content_ids=[int(id) for id in content_ids],
             account_ids=[int(id) for id in account_ids],
+            channel_ids=[str(c).strip() for c in channel_ids if str(c).strip()],
+            rotation_mode=rotation_mode,
             interval=int(interval),
             db=db,
             bot_clients=bot_clients,
@@ -585,22 +448,185 @@ def bot_cooldowns():
     return jsonify({'success': True, 'cooldowns': {}})
 
 
-# ============== 设置 API ==============
+# ============== 内容管理 API ==============
 
-@app.route('/api/settings/cookies', methods=['POST'])
-def update_weidian_cookies():
-    """更新微店 Cookies"""
+# 内容图片存储目录
+CONTENT_IMAGES_DIR = os.path.join(config.DATA_DIR, 'content_images')
+os.makedirs(CONTENT_IMAGES_DIR, exist_ok=True)
+
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+@app.route('/api/contents', methods=['GET'])
+def get_contents():
+    """获取所有内容"""
     try:
-        data = request.get_json() or {}
-        cookie_string = data.get('cookies', '').strip()
-        if not cookie_string:
-            return jsonify({'success': False, 'error': 'Cookies 不能为空'}), 400
-        if save_cookie_string(cookie_string):
-            return jsonify({'success': True, 'message': 'Cookies 已更新'})
-        return jsonify({'success': False, 'error': '保存Cookies失败'}), 500
+        contents = db.get_all_contents()
+        return jsonify({'success': True, 'contents': contents})
     except Exception as e:
-        logger.error(f"更新Cookies失败: {e}")
+        logger.error(f"获取内容列表失败: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/contents', methods=['POST'])
+def add_content():
+    """添加新内容"""
+    try:
+        data = request.get_json()
+        title = data.get('title', '').strip()
+        text_content = data.get('text_content', '').strip()
+        image_paths = data.get('image_paths', [])
+
+        if not title:
+            return jsonify({'success': False, 'error': '标题不能为空'}), 400
+
+        content_id = db.add_content(title=title, text_content=text_content, image_paths=image_paths)
+        if content_id:
+            return jsonify({'success': True, 'id': content_id, 'message': '内容添加成功'})
+        return jsonify({'success': False, 'error': '添加内容失败'}), 500
+    except Exception as e:
+        logger.error(f"添加内容失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/contents/<int:content_id>', methods=['GET'])
+def get_content(content_id):
+    """获取单个内容"""
+    try:
+        content = db.get_content_by_id(content_id)
+        if content:
+            return jsonify({'success': True, 'content': content})
+        return jsonify({'success': False, 'error': '内容不存在'}), 404
+    except Exception as e:
+        logger.error(f"获取内容失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/contents/<int:content_id>', methods=['PUT'])
+def update_content(content_id):
+    """更新内容"""
+    try:
+        data = request.get_json()
+        title = data.get('title')
+        text_content = data.get('text_content')
+        image_paths = data.get('image_paths')
+
+        if db.update_content(content_id, title=title, text_content=text_content, image_paths=image_paths):
+            return jsonify({'success': True, 'message': '内容更新成功'})
+        return jsonify({'success': False, 'error': '更新失败'}), 400
+    except Exception as e:
+        logger.error(f"更新内容失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/contents/<int:content_id>', methods=['DELETE'])
+def delete_content(content_id):
+    """删除内容"""
+    try:
+        # 获取内容信息以删除关联的图片
+        content = db.get_content_by_id(content_id)
+        if content and content.get('image_paths'):
+            for img_path in content['image_paths']:
+                full_path = os.path.join(CONTENT_IMAGES_DIR, img_path)
+                if os.path.exists(full_path):
+                    try:
+                        os.remove(full_path)
+                    except Exception:
+                        pass
+
+        if db.delete_content(content_id):
+            return jsonify({'success': True, 'message': '内容已删除'})
+        return jsonify({'success': False, 'error': '删除失败'}), 400
+    except Exception as e:
+        logger.error(f"删除内容失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/contents/<int:content_id>/upload', methods=['POST'])
+def upload_content_image(content_id):
+    """上传内容图片"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': '没有文件'}), 400
+
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'success': False, 'error': '没有选择文件'}), 400
+
+        if file and allowed_file(file.filename):
+            # 生成唯一文件名
+            import uuid
+            ext = file.filename.rsplit('.', 1)[1].lower()
+            filename = f"{content_id}_{uuid.uuid4().hex[:8]}.{ext}"
+            filepath = os.path.join(CONTENT_IMAGES_DIR, filename)
+            file.save(filepath)
+
+            # 更新内容的图片列表
+            content = db.get_content_by_id(content_id)
+            if content:
+                image_paths = content.get('image_paths', [])
+                image_paths.append(filename)
+                db.update_content(content_id, image_paths=image_paths)
+
+            return jsonify({
+                'success': True,
+                'filename': filename,
+                'url': f'/api/content_image/{filename}'
+            })
+        return jsonify({'success': False, 'error': '不支持的文件类型'}), 400
+    except Exception as e:
+        logger.error(f"上传图片失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/content_image/<filename>', methods=['GET'])
+def get_content_image(filename):
+    """获取内容图片"""
+    try:
+        filepath = os.path.join(CONTENT_IMAGES_DIR, secure_filename(filename))
+        if os.path.exists(filepath):
+            return send_file(filepath)
+        return jsonify({'success': False, 'error': '图片不存在'}), 404
+    except Exception as e:
+        logger.error(f"获取图片失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============== 账号频道配置 API ==============
+
+@app.route('/api/accounts/<int:account_id>/channels', methods=['GET'])
+def get_account_channels(account_id):
+    """获取账号的频道配置"""
+    try:
+        channels = db.get_account_channels(account_id)
+        return jsonify({'success': True, 'channels': channels})
+    except Exception as e:
+        logger.error(f"获取账号频道配置失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/accounts/<int:account_id>/channels', methods=['PUT'])
+def update_account_channels(account_id):
+    """更新账号的频道配置"""
+    try:
+        data = request.get_json()
+        channel_ids = data.get('channel_ids', [])
+
+        # 解析频道ID（支持逗号或换行分隔）
+        if isinstance(channel_ids, str):
+            channel_ids = [c.strip() for c in re.split(r'[,\s\n]+', channel_ids) if c.strip()]
+
+        if db.update_account_channels(account_id, channel_ids):
+            return jsonify({'success': True, 'message': '频道配置已更新'})
+        return jsonify({'success': False, 'error': '更新失败'}), 400
+    except Exception as e:
+        logger.error(f"更新账号频道配置失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 # ============== Bot 线程管理 ==============
 

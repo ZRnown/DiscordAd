@@ -1,16 +1,17 @@
 """
-自动发送任务调度模块 - Discord 商品链接自动发送
+自动发送任务调度模块 - Discord 自定义内容自动发送
 
 实现功能：
-1. 从数据库读取指定店铺的所有商品
-2. 获取用户选择的多个 Discord 账号
-3. 轮询算法：每发一条，换一个账号 (Round Robin)
+1. 从数据库读取用户选择的内容
+2. 获取用户选择的多个 Discord 账号及其预配置的频道
+3. 支持轮换模式和单账号模式
 4. 频率控制：发送后等待指定秒数
 5. 支持随时中断任务
 """
 import asyncio
 import logging
-import re
+import os
+import json
 from typing import List, Dict, Optional
 from datetime import datetime
 
@@ -23,18 +24,19 @@ stop_sender_reason: Optional[str] = None
 task_status = {
     'is_running': False,
     'is_paused': False,
-    'shop_id': None,
-    'channel_id': None,
+    'content_ids': [],
     'account_ids': [],
+    'channel_ids': [],
+    'rotation_mode': True,
     'interval': None,
-    'total_products': 0,
+    'total_contents': 0,
     'sent_count': 0,
-    'current_product': None,
+    'current_content': None,
     'current_account': None,
     'started_at': None,
     'last_sent_at': None,
     'error': None,
-    'next_product_index': 0,
+    'next_content_index': 0,
     'next_account_index': 0
 }
 
@@ -50,69 +52,38 @@ def reset_task_status():
     task_status = {
         'is_running': False,
         'is_paused': False,
-        'shop_id': None,
-        'channel_id': None,
+        'content_ids': [],
         'account_ids': [],
+        'channel_ids': [],
+        'rotation_mode': True,
         'interval': None,
-        'total_products': 0,
+        'total_contents': 0,
         'sent_count': 0,
-        'current_product': None,
+        'current_content': None,
         'current_account': None,
         'started_at': None,
         'last_sent_at': None,
         'error': None,
-        'next_product_index': 0,
+        'next_content_index': 0,
         'next_account_index': 0
     }
 
 
-def _extract_item_id(product: Dict) -> str:
-    item_id = product.get('item_id')
-    if item_id:
-        return str(item_id)
-    url = product.get('product_url') or product.get('cnfans_url') or product.get('acbuy_url') or ''
-    if url:
-        match = re.search(r'itemID=(\d+)', url)
-        if match:
-            return match.group(1)
-        match = re.search(r'[?&]id=(\d+)', url)
-        if match:
-            return match.group(1)
-    return ''
-
-def _normalize_channel_ids(value: object) -> List[str]:
-    if not value:
-        return []
-    if isinstance(value, (list, tuple, set)):
-        items = value
-    else:
-        items = re.split(r'[,\s]+', str(value))
-    normalized = []
-    seen = set()
-    for item in items:
-        channel_id = str(item).strip()
-        if not channel_id:
-            continue
-        if channel_id in seen:
-            continue
-        normalized.append(channel_id)
-        seen.add(channel_id)
-    return normalized
-
 def _persist_task_state(db) -> None:
+    """持久化任务状态到数据库"""
     try:
         db.save_sender_task_state({
             'is_running': task_status.get('is_running'),
             'is_paused': task_status.get('is_paused'),
-            'shop_id': task_status.get('shop_id'),
-            'channel_id': task_status.get('channel_id'),
+            'shop_id': json.dumps(task_status.get('content_ids', [])),  # 复用 shop_id 字段存储 content_ids
+            'channel_id': str(task_status.get('rotation_mode', True)),  # 复用 channel_id 字段存储 rotation_mode
             'account_ids': task_status.get('account_ids', []),
             'interval': task_status.get('interval'),
-            'total_products': task_status.get('total_products', 0),
+            'total_products': task_status.get('total_contents', 0),
             'sent_count': task_status.get('sent_count', 0),
-            'next_product_index': task_status.get('next_product_index', 0),
+            'next_product_index': task_status.get('next_content_index', 0),
             'next_account_index': task_status.get('next_account_index', 0),
-            'current_product': task_status.get('current_product'),
+            'current_product': task_status.get('current_content'),
             'current_account': task_status.get('current_account'),
             'started_at': task_status.get('started_at'),
             'last_sent_at': task_status.get('last_sent_at')
@@ -120,7 +91,9 @@ def _persist_task_state(db) -> None:
     except Exception:
         return
 
+
 def _has_online_bots(bot_clients: List, account_ids: List[int]) -> bool:
+    """检查是否有在线的机器人"""
     if not account_ids:
         return False
     for client in bot_clients:
@@ -133,24 +106,39 @@ def _has_online_bots(bot_clients: List, account_ids: List[int]) -> bool:
             return True
     return False
 
+
 def load_task_state(db) -> None:
     """加载上次任务状态（用于恢复）"""
     state = db.get_sender_task_state()
-    if not state or not state.get('shop_id') or not state.get('channel_id'):
+    if not state:
         return
 
+    # 尝试解析 content_ids（存储在 shop_id 字段）
+    try:
+        content_ids = json.loads(state.get('shop_id') or '[]')
+        if not isinstance(content_ids, list):
+            content_ids = []
+    except:
+        content_ids = []
+
+    if not content_ids:
+        return
+
+    # 解析 rotation_mode（存储在 channel_id 字段）
+    rotation_mode = state.get('channel_id', 'True').lower() != 'false'
+
     reset_task_status()
-    task_status['shop_id'] = state.get('shop_id')
-    task_status['channel_id'] = state.get('channel_id')
+    task_status['content_ids'] = content_ids
+    task_status['rotation_mode'] = rotation_mode
     task_status['account_ids'] = state.get('account_ids', [])
     task_status['interval'] = state.get('interval')
-    task_status['total_products'] = state.get('total_products', 0)
+    task_status['total_contents'] = state.get('total_products', 0)
     task_status['sent_count'] = state.get('sent_count', 0)
-    task_status['current_product'] = state.get('current_product')
+    task_status['current_content'] = state.get('current_product')
     task_status['current_account'] = state.get('current_account')
     task_status['started_at'] = state.get('started_at')
     task_status['last_sent_at'] = state.get('last_sent_at')
-    task_status['next_product_index'] = state.get('next_product_index', 0)
+    task_status['next_content_index'] = state.get('next_product_index', 0)
     task_status['next_account_index'] = state.get('next_account_index', 0)
 
     if state.get('is_running'):
@@ -162,21 +150,23 @@ def load_task_state(db) -> None:
 
 
 async def auto_send_loop(
-    shop_id: int,
-    target_channel_ids: List[str],
+    content_ids: List[int],
     selected_account_ids: List[int],
+    channel_ids: List[str],
+    rotation_mode: bool,
     interval: int,
     db,
     bot_clients: List,
-    start_product_index: int = 0,
+    start_content_index: int = 0,
     start_account_index: int = 0
 ):
     """
     自动发送循环任务
 
-    :param shop_id: 选中的店铺ID（用于从数据库捞商品）
-    :param target_channel_ids: 目标 Discord 频道 ID 列表
-    :param selected_account_ids: 用户勾选的 Account ID 列表 [1, 2, 5]
+    :param content_ids: 选中的内容ID列表
+    :param selected_account_ids: 用户勾选的 Account ID 列表
+    :param channel_ids: 发送目标频道ID列表
+    :param rotation_mode: 是否轮换模式
     :param interval: 发送间隔（秒）
     :param db: 数据库实例
     :param bot_clients: 机器人客户端列表
@@ -185,104 +175,110 @@ async def auto_send_loop(
 
     task_status['is_running'] = True
     task_status['is_paused'] = False
-    task_status['shop_id'] = shop_id
-    channel_ids = _normalize_channel_ids(target_channel_ids)
-    task_status['channel_id'] = ','.join(channel_ids)
+    task_status['content_ids'] = content_ids
     task_status['account_ids'] = selected_account_ids
+    task_status['rotation_mode'] = rotation_mode
     task_status['interval'] = interval
     task_status['started_at'] = datetime.now().isoformat()
     task_status['error'] = None
-    task_status['next_product_index'] = max(0, start_product_index)
+    task_status['next_content_index'] = max(0, start_content_index)
     task_status['next_account_index'] = max(0, start_account_index)
     _persist_task_state(db)
 
-    logger.info(f"启动自动发送: 店铺{shop_id} -> 频道{','.join(channel_ids)}，间隔{interval}s")
+    logger.info(f"启动自动发送: 内容数={len(content_ids)}，账号数={len(selected_account_ids)}，轮换模式={rotation_mode}，间隔{interval}s")
 
     try:
-        if not channel_ids:
-            task_status['error'] = "请输入目标频道ID"
+        # 1. 获取所有选中的内容
+        contents = []
+        for cid in content_ids:
+            content = db.get_content_by_id(cid)
+            if content:
+                contents.append(content)
+
+        if not contents:
+            task_status['error'] = "没有找到选中的内容"
             logger.error(task_status['error'])
             return
 
-        # 1. 获取该店铺所有商品链接
-        shop_info = db.get_shop_by_id(shop_id)
-        if not shop_info:
-            task_status['error'] = f"店铺 {shop_id} 不存在"
-            logger.error(task_status['error'])
-            return
+        task_status['total_contents'] = len(contents)
+        logger.info(f"待发送内容数: {len(contents)}")
 
-        shop_name = shop_info.get('name', '')
-
-        with db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT id, product_url, title, cnfans_url, item_id FROM products WHERE shop_name = ?",
-                (shop_name,)
-            )
-            products = [dict(row) for row in cursor.fetchall()]
-
-        if not products:
-            task_status['error'] = f"店铺 '{shop_name}' 没有商品数据，请先执行抓取"
-            logger.warning(task_status['error'])
-            return
-
-        task_status['total_products'] = len(products)
-        logger.info(f"待发送商品数: {len(products)}")
-        if task_status['next_product_index'] >= len(products):
-            task_status['sent_count'] = len(products)
-            task_status['current_product'] = None
+        if task_status['next_content_index'] >= len(contents):
+            task_status['sent_count'] = len(contents)
+            task_status['current_content'] = None
             _persist_task_state(db)
-            logger.info("商品已发送完毕，无需继续")
+            logger.info("内容已发送完毕，无需继续")
             return
 
         # 2. 筛选出可用的在线 Bot 客户端
-        active_bots = [
-            client for client in bot_clients
-            if hasattr(client, 'account_id')
-            and client.account_id in selected_account_ids
-            and client.is_ready()
-            and not client.is_closed()
-        ]
+        active_bots = []
+        for client in bot_clients:
+            if (
+                hasattr(client, 'account_id')
+                and client.account_id in selected_account_ids
+                and client.is_ready()
+                and not client.is_closed()
+            ):
+                active_bots.append(client)
 
         if not active_bots:
             task_status['error'] = "没有选中的账号在线，请先启动账号"
             logger.error(task_status['error'])
             return
 
-        logger.info(f"可用账号数: {len(active_bots)}")
+        logger.info(f"可用账号数: {len(active_bots)}, 目标频道数: {len(channel_ids)}")
 
-        product_idx = task_status['next_product_index']
+        content_idx = task_status['next_content_index']
         bot_idx = task_status['next_account_index']
-        task_status['sent_count'] = product_idx
+        task_status['sent_count'] = content_idx
 
         # 3. 循环发送
         while not stop_sender_event.is_set():
-            if product_idx >= len(products):
-                logger.info("所有商品已发送完毕，任务结束")
+            if content_idx >= len(contents):
+                logger.info("所有内容已发送完毕，任务结束")
                 break
 
-            # 获取当前要发的商品
-            product = products[product_idx]
-            link_to_send = product.get('product_url', '')
-            title = product.get('title', '未知商品')
-            message_content = f"{title}\n{link_to_send}"
+            # 获取当前要发的内容
+            content = contents[content_idx]
+            title = content.get('title', '未知内容')
+            text_content = content.get('text_content', '')
+            image_paths = content.get('image_paths', [])
 
-            # 获取当前轮换的账号 (Round Robin)
-            current_bot = active_bots[bot_idx % len(active_bots)]
+            # 获取当前轮换的账号
+            if rotation_mode:
+                current_bot = active_bots[bot_idx % len(active_bots)]
+            else:
+                current_bot = active_bots[0]  # 单账号模式只用第一个
 
-            task_status['current_product'] = _extract_item_id(product) or title[:50]
+            task_status['current_content'] = title[:50]
             task_status['current_account'] = getattr(current_bot, 'user', None)
             if task_status['current_account']:
                 task_status['current_account'] = str(task_status['current_account'])
-            task_status['next_product_index'] = product_idx
+            task_status['next_content_index'] = content_idx
             task_status['next_account_index'] = bot_idx
             _persist_task_state(db)
 
             try:
+                # 发送到所有配置的频道
                 for channel_id in channel_ids:
                     channel = current_bot.get_channel(int(channel_id))
                     if channel:
-                        await channel.send(message_content)
+                        # 发送文字内容
+                        if text_content:
+                            await channel.send(text_content)
+
+                        # 发送图片
+                        if image_paths:
+                            from config import config
+                            import discord
+                            content_images_dir = os.path.join(config.DATA_DIR, 'content_images')
+                            files = []
+                            for img_filename in image_paths:
+                                img_path = os.path.join(content_images_dir, img_filename)
+                                if os.path.exists(img_path):
+                                    files.append(discord.File(img_path))
+                            if files:
+                                await channel.send(files=files)
                     else:
                         logger.error(
                             f"账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
@@ -291,20 +287,21 @@ async def auto_send_loop(
 
                 task_status['sent_count'] += 1
                 task_status['last_sent_at'] = datetime.now().isoformat()
-                task_status['next_product_index'] = product_idx + 1
+                task_status['next_content_index'] = content_idx + 1
                 task_status['next_account_index'] = bot_idx + 1
                 _persist_task_state(db)
                 logger.info(
                     f"✅ 账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
-                    f"发送成功 ({task_status['sent_count']}/{task_status['total_products']}): {title[:30]}..."
+                    f"发送成功 ({task_status['sent_count']}/{task_status['total_contents']}): {title[:30]}..."
                 )
             except Exception as e:
                 logger.error(f"发送失败: {e}")
                 # 继续下一条，不中断任务
 
             # 索引递增
-            product_idx += 1
-            bot_idx += 1
+            content_idx += 1
+            if rotation_mode:
+                bot_idx += 1
 
             # 等待间隔（支持随时中断）
             try:
@@ -312,11 +309,9 @@ async def auto_send_loop(
                     stop_sender_event.wait(),
                     timeout=float(interval)
                 )
-                # 如果 wait 返回了，说明 event 被 set 了，收到停止信号
                 logger.info("收到停止信号，任务中断")
                 break
             except asyncio.TimeoutError:
-                # 超时意味着时间到了，继续下一次循环
                 continue
 
     except asyncio.CancelledError:
@@ -336,23 +331,25 @@ async def auto_send_loop(
 
 
 def start_sending_task(
-    shop_id: int,
-    channel_ids: List[str],
+    content_ids: List[int],
     account_ids: List[int],
+    channel_ids: List[str],
+    rotation_mode: bool,
     interval: int,
     db,
     bot_clients: List,
     bot_loop: asyncio.AbstractEventLoop,
-    start_product_index: int = 0,
+    start_content_index: int = 0,
     start_account_index: int = 0,
     resume: bool = False
 ) -> Dict:
     """
     启动自动发送任务（从 Flask 线程调用）
 
-    :param shop_id: 店铺 ID
-    :param channel_ids: 目标频道 ID 列表
+    :param content_ids: 内容 ID 列表
     :param account_ids: 账号 ID 列表
+    :param channel_ids: 发送目标频道 ID 列表
+    :param rotation_mode: 是否轮换模式
     :param interval: 发送间隔（秒）
     :param db: 数据库实例
     :param bot_clients: 机器人客户端列表
@@ -364,9 +361,11 @@ def start_sending_task(
     if task_status['is_running'] or (task_status['is_paused'] and not resume):
         return {'success': False, 'error': '已有任务正在运行或已暂停，请先停止或继续'}
 
-    normalized_channel_ids = _normalize_channel_ids(channel_ids)
-    if not normalized_channel_ids:
-        return {'success': False, 'error': '请输入目标频道ID'}
+    if not content_ids:
+        return {'success': False, 'error': '请选择至少一条内容'}
+
+    if not channel_ids:
+        return {'success': False, 'error': '请输入至少一个频道ID'}
 
     if not _has_online_bots(bot_clients, account_ids):
         return {'success': False, 'error': '没有选中的账号在线，请先启动账号'}
@@ -376,26 +375,28 @@ def start_sending_task(
     global stop_sender_reason
     stop_sender_reason = None
     reset_task_status()
-    task_status['shop_id'] = shop_id
-    task_status['channel_id'] = ','.join(normalized_channel_ids)
+    task_status['content_ids'] = content_ids
     task_status['account_ids'] = account_ids
+    task_status['channel_ids'] = channel_ids
+    task_status['rotation_mode'] = rotation_mode
     task_status['interval'] = interval
-    task_status['next_product_index'] = max(0, start_product_index)
+    task_status['next_content_index'] = max(0, start_content_index)
     task_status['next_account_index'] = max(0, start_account_index)
     if resume:
-        task_status['sent_count'] = max(0, start_product_index)
+        task_status['sent_count'] = max(0, start_content_index)
 
     # 在 bot 的事件循环中创建任务
     try:
         future = asyncio.run_coroutine_threadsafe(
             auto_send_loop(
-                shop_id=shop_id,
-                target_channel_ids=normalized_channel_ids,
+                content_ids=content_ids,
                 selected_account_ids=account_ids,
+                channel_ids=channel_ids,
+                rotation_mode=rotation_mode,
                 interval=interval,
                 db=db,
                 bot_clients=bot_clients,
-                start_product_index=start_product_index,
+                start_content_index=start_content_index,
                 start_account_index=start_account_index
             ),
             bot_loop
@@ -408,11 +409,7 @@ def start_sending_task(
 
 
 def stop_sending_task(db=None) -> Dict:
-    """
-    停止自动发送任务
-
-    :return: 操作结果
-    """
+    """停止自动发送任务"""
     global stop_sender_event, stop_sender_reason
 
     if not task_status['is_running'] and not task_status['is_paused']:
@@ -443,28 +440,40 @@ def pause_sending_task() -> Dict:
 def resume_sending_task(db, bot_clients: List, bot_loop: asyncio.AbstractEventLoop) -> Dict:
     """继续自动发送任务"""
     state = db.get_sender_task_state()
-    if not state or not state.get('shop_id') or not state.get('channel_id'):
+    if not state:
         return {'success': False, 'error': '没有可继续的任务'}
+
+    # 解析 content_ids
+    try:
+        content_ids = json.loads(state.get('shop_id') or '[]')
+        if not isinstance(content_ids, list):
+            content_ids = []
+    except:
+        content_ids = []
+
+    if not content_ids:
+        return {'success': False, 'error': '没有可继续的任务'}
+
     if task_status['is_running']:
         return {'success': False, 'error': '任务正在运行中'}
 
-    channel_ids = _normalize_channel_ids(state.get('channel_id'))
-    if not channel_ids:
-        return {'success': False, 'error': '没有可继续的任务'}
+    # 解析 rotation_mode
+    rotation_mode = state.get('channel_id', 'True').lower() != 'false'
 
     account_ids = [int(item) for item in state.get('account_ids', [])]
     if not _has_online_bots(bot_clients, account_ids):
         return {'success': False, 'error': '没有选中的账号在线，请先启动账号'}
 
     return start_sending_task(
-        shop_id=int(state['shop_id']),
-        channel_ids=channel_ids,
+        content_ids=content_ids,
         account_ids=account_ids,
+        channel_ids=task_status.get('channel_ids', []),
+        rotation_mode=rotation_mode,
         interval=int(state.get('interval') or 60),
         db=db,
         bot_clients=bot_clients,
         bot_loop=bot_loop,
-        start_product_index=int(state.get('next_product_index') or 0),
+        start_content_index=int(state.get('next_product_index') or 0),
         start_account_index=int(state.get('next_account_index') or 0),
         resume=True
     )

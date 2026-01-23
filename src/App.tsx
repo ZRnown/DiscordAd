@@ -1,10 +1,10 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { HashRouter, Routes, Route, NavLink } from 'react-router-dom'
 import { Toaster } from 'sonner'
-import { Users, Store, Send } from 'lucide-react'
+import { Users, FileText, Send } from 'lucide-react'
 
 import AccountsPage from './pages/AccountsPage'
-import ShopsPage from './pages/ShopsPage'
+import ContentsPage from './pages/ContentsPage'
 import AutoSenderPage from './pages/AutoSenderPage'
 import LicenseGate from './components/LicenseGate'
 
@@ -107,7 +107,7 @@ function App() {
               </li>
               <li>
                 <NavLink
-                  to="/shops"
+                  to="/contents"
                   className={({ isActive }) =>
                     `flex items-center gap-3 px-4 py-2 rounded-lg transition-colors ${
                       isActive
@@ -116,8 +116,8 @@ function App() {
                     }`
                   }
                 >
-                  <Store size={20} />
-                  <span>店铺管理</span>
+                  <FileText size={20} />
+                  <span>内容管理</span>
                 </NavLink>
               </li>
             </ul>
@@ -134,7 +134,7 @@ function App() {
             <Routes>
               <Route path="/" element={<AutoSenderPage />} />
               <Route path="/accounts" element={<AccountsPage />} />
-              <Route path="/shops" element={<ShopsPage />} />
+              <Route path="/contents" element={<ContentsPage />} />
             </Routes>
           </main>
         </div>

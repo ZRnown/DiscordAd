@@ -1,28 +1,30 @@
 import { useState, useEffect, useRef } from 'react'
 import { toast } from 'sonner'
-import { Play, Square, RefreshCw, CheckCircle, Circle } from 'lucide-react'
+import { Play, Square, RefreshCw, CheckCircle, Circle, ToggleLeft, ToggleRight } from 'lucide-react'
 
-interface Shop {
+interface Content {
   id: number
-  shop_id: string
-  name: string
-  product_count: number
+  title: string
+  text_content: string
+  image_paths: string[]
 }
 
 interface Account {
   id: number
   username: string
   is_online: boolean
+  channel_ids?: string[]
 }
 
 interface TaskStatus {
   is_running: boolean
   is_paused: boolean
-  shop_id: number | null
-  channel_id: string | null
-  total_products: number
+  content_ids: number[]
+  account_ids: number[]
+  rotation_mode: boolean
+  total_contents: number
   sent_count: number
-  current_product: string | null
+  current_content: string | null
   current_account: string | null
   started_at: string | null
   last_sent_at: string | null
@@ -32,40 +34,37 @@ interface TaskStatus {
 const API_BASE = 'http://127.0.0.1:5001/api'
 
 export default function AutoSenderPage() {
-  const [shops, setShops] = useState<Shop[]>([])
+  const [contents, setContents] = useState<Content[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
   const [status, setStatus] = useState<TaskStatus | null>(null)
   const previousStatusRef = useRef<TaskStatus | null>(null)
 
   // 表单状态
-  const [selectedShop, setSelectedShop] = useState('')
-  const [targetChannel, setTargetChannel] = useState('')
+  const [selectedContents, setSelectedContents] = useState<number[]>([])
   const [selectedAccounts, setSelectedAccounts] = useState<number[]>([])
+  const [rotationMode, setRotationMode] = useState(true)
   const [sendInterval, setSendInterval] = useState('60')
+  const [channelIds, setChannelIds] = useState('')
   const [loading, setLoading] = useState(false)
 
-  const currentShop = status?.shop_id
-    ? shops.find((shop) => shop.id === status.shop_id) || null
-    : null
-
-  // 获取店铺和账号数据
+  // 获取内容和账号数据
   const fetchData = async () => {
     try {
-      const [shopsRes, accountsRes, statusRes] = await Promise.all([
-        fetch(`${API_BASE}/shops`),
+      const [contentsRes, accountsRes, statusRes] = await Promise.all([
+        fetch(`${API_BASE}/contents`),
         fetch(`${API_BASE}/accounts`),
         fetch(`${API_BASE}/sender/status`)
       ])
 
-      const shopsData = await shopsRes.json()
+      const contentsData = await contentsRes.json()
       const accountsData = await accountsRes.json()
       const statusData = await statusRes.json()
 
-      if (shopsData.success) {
-        setShops(shopsData.shops || [])
+      if (contentsData.success) {
+        setContents(contentsData.contents || [])
       }
       if (accountsData.success) {
-        // 只显示在线账号
+        // 只显示在线账号（不再要求配置频道）
         const onlineAccounts = (accountsData.accounts || []).filter(
           (a: Account) => a.is_online
         )
@@ -81,7 +80,6 @@ export default function AutoSenderPage() {
 
   useEffect(() => {
     fetchData()
-    // 定期刷新状态
     const timer = window.setInterval(fetchData, 3000)
     return () => clearInterval(timer)
   }, [])
@@ -95,39 +93,6 @@ export default function AutoSenderPage() {
   }, [accounts])
 
   useEffect(() => {
-    const savedShop = localStorage.getItem('autoSender.selectedShop')
-    const savedChannel = localStorage.getItem('autoSender.targetChannel')
-    if (savedShop) {
-      setSelectedShop(savedShop)
-    }
-    if (savedChannel) {
-      setTargetChannel(savedChannel)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!status) return
-    if (status.shop_id && (status.is_running || status.is_paused || !selectedShop)) {
-      setSelectedShop(String(status.shop_id))
-    }
-    if (status.channel_id && (status.is_running || status.is_paused || !targetChannel)) {
-      setTargetChannel(status.channel_id)
-    }
-  }, [status, selectedShop, targetChannel])
-
-  useEffect(() => {
-    if (selectedShop) {
-      localStorage.setItem('autoSender.selectedShop', selectedShop)
-    }
-  }, [selectedShop])
-
-  useEffect(() => {
-    if (targetChannel) {
-      localStorage.setItem('autoSender.targetChannel', targetChannel)
-    }
-  }, [targetChannel])
-
-  useEffect(() => {
     if (!status) {
       previousStatusRef.current = status
       return
@@ -138,7 +103,7 @@ export default function AutoSenderPage() {
         toast.error(`任务异常: ${status.error}`)
       } else if (status.is_paused) {
         toast.success('任务已暂停')
-      } else if (status.total_products > 0 && status.sent_count >= status.total_products) {
+      } else if (status.total_contents > 0 && status.sent_count >= status.total_contents) {
         toast.success('任务已完成')
       } else {
         toast.success('任务已停止')
@@ -147,45 +112,70 @@ export default function AutoSenderPage() {
     previousStatusRef.current = status
   }, [status])
 
+  const toggleContent = (id: number) => {
+    setSelectedContents((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    )
+  }
+
   const toggleAccount = (id: number) => {
+    if (!rotationMode && selectedAccounts.length >= 1 && !selectedAccounts.includes(id)) {
+      toast.error('单账号模式只能选择一个账号')
+      return
+    }
     setSelectedAccounts((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
     )
   }
 
-  const parseChannelIds = (value: string) =>
-    value
-      .split(/[\s,]+/)
-      .map((item) => item.trim())
-      .filter(Boolean)
+  const allContentsSelected =
+    contents.length > 0 && contents.every((c) => selectedContents.includes(c.id))
 
-  const allSelected =
-    accounts.length > 0 && accounts.every((account) => selectedAccounts.includes(account.id))
+  const toggleSelectAllContents = () => {
+    if (allContentsSelected) {
+      setSelectedContents([])
+    } else {
+      setSelectedContents(contents.map((c) => c.id))
+    }
+  }
 
-  const toggleSelectAll = () => {
-    if (allSelected) {
-      setSelectedAccounts([])
+  const allAccountsSelected =
+    accounts.length > 0 && accounts.every((a) => selectedAccounts.includes(a.id))
+
+  const toggleSelectAllAccounts = () => {
+    if (!rotationMode) {
+      toast.error('单账号模式只能选择一个账号')
       return
     }
-    setSelectedAccounts(accounts.map((account) => account.id))
+    if (allAccountsSelected) {
+      setSelectedAccounts([])
+    } else {
+      setSelectedAccounts(accounts.map((a) => a.id))
+    }
+  }
+
+  const handleRotationModeChange = (mode: boolean) => {
+    setRotationMode(mode)
+    if (!mode && selectedAccounts.length > 1) {
+      setSelectedAccounts([selectedAccounts[0]])
+    }
   }
 
   const handleStart = async () => {
-    if (!selectedShop) {
-      toast.error('请选择店铺')
-      return
-    }
-    if (!targetChannel) {
-      toast.error('请输入目标频道 ID')
+    if (selectedContents.length === 0) {
+      toast.error('请选择至少一条内容')
       return
     }
     if (selectedAccounts.length === 0) {
       toast.error('请选择至少一个账号')
       return
     }
-    const channelIds = parseChannelIds(targetChannel)
-    if (channelIds.length === 0) {
-      toast.error('请输入目标频道 ID')
+    const channels = channelIds
+      .split(/[\n,\s]+/)
+      .map((c) => c.trim())
+      .filter(Boolean)
+    if (channels.length === 0) {
+      toast.error('请输入至少一个频道ID')
       return
     }
 
@@ -195,9 +185,10 @@ export default function AutoSenderPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          shopId: selectedShop,
-          channelIds,
+          contentIds: selectedContents,
           accountIds: selectedAccounts,
+          channelIds: channels,
+          rotationMode,
           interval: parseInt(sendInterval)
         })
       })
@@ -277,7 +268,7 @@ export default function AutoSenderPage() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold text-gray-800">自动发送控制台</h2>
-          <p className="text-gray-500">配置并启动自动发送任务</p>
+          <p className="text-gray-500">选择内容和账号，启动自动发送任务</p>
         </div>
         <button
           onClick={fetchData}
@@ -288,48 +279,100 @@ export default function AutoSenderPage() {
         </button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* 左侧：配置区 */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* 左侧：内容选择 */}
+        <div className="bg-white rounded-lg border p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold text-gray-800">选择内容</h3>
+            <button
+              type="button"
+              onClick={toggleSelectAllContents}
+              disabled={isRunning || isPaused}
+              className="text-sm text-blue-600 hover:text-blue-700 disabled:opacity-50"
+            >
+              {allContentsSelected ? '全不选' : '全选'}
+            </button>
+          </div>
+
+          {contents.length === 0 ? (
+            <div className="text-center py-8 text-gray-500">
+              暂无内容，请先在内容管理页面添加
+            </div>
+          ) : (
+            <div className="space-y-2 max-h-[300px] overflow-y-auto">
+              {contents.map((content) => (
+                <div
+                  key={content.id}
+                  onClick={() => !(isRunning || isPaused) && toggleContent(content.id)}
+                  className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-colors ${
+                    selectedContents.includes(content.id)
+                      ? 'bg-blue-50 border-blue-200 border'
+                      : 'bg-gray-50 hover:bg-gray-100'
+                  } ${isRunning || isPaused ? 'opacity-50 cursor-not-allowed' : ''}`}
+                >
+                  {selectedContents.includes(content.id) ? (
+                    <CheckCircle size={20} className="text-blue-600 flex-shrink-0" />
+                  ) : (
+                    <Circle size={20} className="text-gray-400 flex-shrink-0" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <span className="font-medium text-gray-800 block truncate">
+                      {content.title}
+                    </span>
+                    {content.text_content && (
+                      <span className="text-xs text-gray-500 block truncate">
+                        {content.text_content.substring(0, 50)}...
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 中间：配置区 */}
         <div className="bg-white rounded-lg border p-6">
           <h3 className="text-lg font-bold text-gray-800 mb-4">任务配置</h3>
 
           <div className="space-y-4">
-            {/* 选择店铺 */}
+            {/* 发送模式 */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                选择店铺 (数据源)
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                发送模式
               </label>
-              <select
-                value={selectedShop}
-                onChange={(e) => setSelectedShop(e.target.value)}
-                disabled={isRunning || isPaused}
-                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
-              >
-                <option value="">选择要发送的店铺</option>
-                {shops.map((shop) => (
-                  <option key={shop.id} value={shop.id}>
-                    {shop.name} ({shop.product_count || 0} 个商品)
-                  </option>
-                ))}
-              </select>
+              <div className="flex gap-4">
+                <button
+                  onClick={() => handleRotationModeChange(true)}
+                  disabled={isRunning || isPaused}
+                  className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg border transition-colors ${
+                    rotationMode
+                      ? 'bg-blue-50 border-blue-300 text-blue-700'
+                      : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
+                  } disabled:opacity-50`}
+                >
+                  <ToggleRight size={18} />
+                  轮换模式
+                </button>
+                <button
+                  onClick={() => handleRotationModeChange(false)}
+                  disabled={isRunning || isPaused}
+                  className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg border transition-colors ${
+                    !rotationMode
+                      ? 'bg-blue-50 border-blue-300 text-blue-700'
+                      : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
+                  } disabled:opacity-50`}
+                >
+                  <ToggleLeft size={18} />
+                  单账号
+                </button>
+              </div>
+              <p className="mt-1 text-xs text-gray-500">
+                {rotationMode ? '多账号轮流发送' : '只用一个账号发送'}
+              </p>
             </div>
 
-            {/* 目标频道 */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                目标 Discord 频道 ID（可多个，逗号或空格分隔）
-              </label>
-              <input
-                type="text"
-                value={targetChannel}
-                onChange={(e) => setTargetChannel(e.target.value)}
-                disabled={isRunning || isPaused}
-                placeholder="例如: 123456789012345678, 234567890123456789"
-                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
-              />
-            </div>
-
-            {/* 发送频率 */}
+            {/* 发送间隔 */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 发送间隔 (秒)
@@ -341,92 +384,105 @@ export default function AutoSenderPage() {
                 disabled={isRunning || isPaused}
                 min="10"
                 max="3600"
-                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
+                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100"
               />
-              <p className="mt-1 text-xs text-gray-500">建议设置 60 秒以上，避免触发限制</p>
+              <p className="mt-1 text-xs text-gray-500">建议设置 60 秒以上</p>
+            </div>
+
+            {/* 频道配置 */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                发送频道 ID
+              </label>
+              <textarea
+                value={channelIds}
+                onChange={(e) => setChannelIds(e.target.value)}
+                disabled={isRunning || isPaused}
+                placeholder="输入频道ID，每行一个或用逗号分隔"
+                rows={3}
+                className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 text-sm"
+              />
+              <p className="mt-1 text-xs text-gray-500">所有账号都会向这些频道发送</p>
             </div>
 
             {/* 操作按钮 */}
-            <div className="pt-4 flex gap-4">
+            <div className="pt-4 space-y-2">
               <button
                 onClick={handleStart}
                 disabled={isRunning || isPaused || loading}
-                className="flex-1 flex items-center justify-center gap-2 px-4 py-2 text-white bg-green-600 rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full flex items-center justify-center gap-2 px-4 py-2 text-white bg-green-600 rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Play size={18} />
                 启动任务
               </button>
-              <button
-                onClick={isPaused ? handleResume : handlePause}
-                disabled={loading || (!isRunning && !isPaused)}
-                className="flex-1 flex items-center justify-center gap-2 px-4 py-2 text-white bg-amber-500 rounded-lg hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isPaused ? '继续任务' : '暂停任务'}
-              </button>
-              <button
-                onClick={handleStop}
-                disabled={(!isRunning && !isPaused) || loading}
-                className="flex-1 flex items-center justify-center gap-2 px-4 py-2 text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Square size={18} />
-                停止任务
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={isPaused ? handleResume : handlePause}
+                  disabled={loading || (!isRunning && !isPaused)}
+                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2 text-white bg-amber-500 rounded-lg hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isPaused ? '继续' : '暂停'}
+                </button>
+                <button
+                  onClick={handleStop}
+                  disabled={(!isRunning && !isPaused) || loading}
+                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2 text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Square size={18} />
+                  停止
+                </button>
+              </div>
             </div>
           </div>
         </div>
 
-        {/* 右侧：账号选择区 */}
+        {/* 右侧：账号选择 */}
         <div className="bg-white rounded-lg border p-6">
-          <h3 className="text-lg font-bold text-gray-800 mb-4">账号轮换池</h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold text-gray-800">选择账号</h3>
+            {rotationMode && (
+              <button
+                type="button"
+                onClick={toggleSelectAllAccounts}
+                disabled={isRunning || isPaused}
+                className="text-sm text-blue-600 hover:text-blue-700 disabled:opacity-50"
+              >
+                {allAccountsSelected ? '全不选' : '全选'}
+              </button>
+            )}
+          </div>
 
           {accounts.length === 0 ? (
             <div className="text-center py-8 text-gray-500">
-              暂无在线账号，请在账号管理页启动账号
+              暂无可用账号，请先启动账号
             </div>
           ) : (
-            <>
-              <div className="flex items-center justify-between text-sm text-gray-500 mb-2">
-                <span>在线账号 {accounts.length}</span>
-                <button
-                  type="button"
-                  onClick={toggleSelectAll}
-                  disabled={isRunning || isPaused}
-                  className="text-blue-600 hover:text-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            <div className="space-y-2 max-h-[300px] overflow-y-auto">
+              {accounts.map((account) => (
+                <div
+                  key={account.id}
+                  onClick={() => !(isRunning || isPaused) && toggleAccount(account.id)}
+                  className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-colors ${
+                    selectedAccounts.includes(account.id)
+                      ? 'bg-blue-50 border-blue-200 border'
+                      : 'bg-gray-50 hover:bg-gray-100'
+                  } ${isRunning || isPaused ? 'opacity-50 cursor-not-allowed' : ''}`}
                 >
-                  {allSelected ? '全不选' : '全选'}
-                </button>
-              </div>
-              <div className="space-y-2 max-h-[300px] overflow-y-auto">
-                {accounts.map((account) => (
-                  <div
-                    key={account.id}
-                    onClick={() => !(isRunning || isPaused) && toggleAccount(account.id)}
-                    className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-colors ${
-                      selectedAccounts.includes(account.id)
-                        ? 'bg-blue-50 border-blue-200 border'
-                        : 'bg-gray-50 hover:bg-gray-100'
-                    } ${isRunning || isPaused ? 'opacity-50 cursor-not-allowed' : ''}`}
-                  >
-                    {selectedAccounts.includes(account.id) ? (
-                      <CheckCircle size={20} className="text-blue-600" />
-                    ) : (
-                      <Circle size={20} className="text-gray-400" />
-                    )}
-                    <div className="flex-1">
-                      <span className="font-medium text-gray-800">
-                        {account.username || `账号 ${account.id}`}
-                      </span>
-                      <span className="ml-2 text-xs text-green-600">在线</span>
-                    </div>
+                  {selectedAccounts.includes(account.id) ? (
+                    <CheckCircle size={20} className="text-blue-600 flex-shrink-0" />
+                  ) : (
+                    <Circle size={20} className="text-gray-400 flex-shrink-0" />
+                  )}
+                  <div className="flex-1">
+                    <span className="font-medium text-gray-800">
+                      {account.username || `账号 ${account.id}`}
+                    </span>
+                    <span className="ml-2 text-xs text-green-600">在线</span>
                   </div>
-                ))}
-              </div>
-            </>
+                </div>
+              ))}
+            </div>
           )}
-
-          <p className="mt-4 text-xs text-gray-500">
-            系统将按照勾选顺序，每隔 {sendInterval} 秒切换下一个账号发送一条链接
-          </p>
         </div>
       </div>
 
@@ -434,7 +490,7 @@ export default function AutoSenderPage() {
       {status && (
         <div className="bg-white rounded-lg border p-6">
           <h3 className="text-lg font-bold text-gray-800 mb-4">任务状态</h3>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
             <div>
               <p className="text-sm text-gray-500">状态</p>
               <p
@@ -448,28 +504,32 @@ export default function AutoSenderPage() {
             <div>
               <p className="text-sm text-gray-500">进度</p>
               <p className="font-medium text-gray-800">
-                {status.sent_count} / {status.total_products}
+                {status.sent_count} / {status.total_contents}
               </p>
             </div>
             <div>
-              <p className="text-sm text-gray-500">当前店铺</p>
-              <p className="font-medium text-gray-800 truncate">
-                {currentShop ? `${currentShop.name} (${currentShop.shop_id})` : status.shop_id || '-'}
+              <p className="text-sm text-gray-500">发送模式</p>
+              <p className="font-medium text-gray-800">
+                {status.rotation_mode ? '轮换模式' : '单账号模式'}
               </p>
             </div>
             <div>
-              <p className="text-sm text-gray-500">目标频道</p>
-              <p className="font-medium text-gray-800 truncate">{status.channel_id || '-'}</p>
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">当前商品ID</p>
+              <p className="text-sm text-gray-500">当前内容</p>
               <p className="font-medium text-gray-800 truncate">
-                {status.current_product || '-'}
+                {status.current_content || '-'}
               </p>
             </div>
             <div>
               <p className="text-sm text-gray-500">当前账号</p>
               <p className="font-medium text-gray-800">{status.current_account || '-'}</p>
+            </div>
+            <div>
+              <p className="text-sm text-gray-500">最后发送</p>
+              <p className="font-medium text-gray-800">
+                {status.last_sent_at
+                  ? new Date(status.last_sent_at).toLocaleTimeString()
+                  : '-'}
+              </p>
             </div>
           </div>
           {status.error && (

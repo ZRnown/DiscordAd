@@ -196,10 +196,29 @@ class Database:
                     token TEXT UNIQUE NOT NULL,
                     user_id INTEGER,
                     status TEXT DEFAULT 'offline',
+                    channel_ids TEXT DEFAULT '[]',
                     last_active TIMESTAMP,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE SET NULL
+                )
+            ''')
+
+            # 为现有 discord_accounts 表添加 channel_ids 字段
+            try:
+                cursor.execute('ALTER TABLE discord_accounts ADD COLUMN channel_ids TEXT DEFAULT \'[]\'')
+            except sqlite3.OperationalError:
+                pass  # 字段已存在
+
+            # 创建自定义内容表（用于自动发送）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS contents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    text_content TEXT,
+                    image_paths TEXT DEFAULT '[]',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
 
@@ -1279,19 +1298,32 @@ class Database:
                 if user_id is None:
                     # 管理员查询所有账号
                     cursor.execute('''
-                        SELECT id, username, token, status, last_active, created_at, user_id
+                        SELECT id, username, token, status, channel_ids, last_active, created_at, user_id
                     FROM discord_accounts
                     ORDER BY created_at DESC
                     ''')
                 else:
                     # 普通用户查询自己的账号
                     cursor.execute('''
-                        SELECT id, username, token, status, last_active, created_at, user_id
+                        SELECT id, username, token, status, channel_ids, last_active, created_at, user_id
                         FROM discord_accounts
                         WHERE user_id = ?
                         ORDER BY created_at DESC
                     ''', (user_id,))
-                return [dict(row) for row in cursor.fetchall()]
+                rows = cursor.fetchall()
+                accounts = []
+                for row in rows:
+                    acc = dict(row)
+                    # 解析 channel_ids JSON
+                    if acc.get('channel_ids'):
+                        try:
+                            acc['channel_ids'] = json.loads(acc['channel_ids'])
+                        except:
+                            acc['channel_ids'] = []
+                    else:
+                        acc['channel_ids'] = []
+                    accounts.append(acc)
+                return accounts
         except Exception as e:
             logger.error(f"获取用户Discord账号失败: {e}")
             return []
@@ -3052,3 +3084,153 @@ Database.add_account = lambda self, token, username='': add_account(token, usern
 Database.get_account_by_id = lambda self, account_id: get_account_by_id(account_id)
 Database.delete_account = lambda self, account_id: delete_account(account_id)
 Database.get_products_by_shop = lambda self, shop_name: get_products_by_shop(shop_name)
+
+
+# ===== 内容管理方法 =====
+
+def get_all_contents() -> List[Dict]:
+    """获取所有内容"""
+    try:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM contents ORDER BY created_at DESC')
+            rows = cursor.fetchall()
+            contents = []
+            for row in rows:
+                content = dict(row)
+                # 解析 image_paths JSON
+                try:
+                    content['image_paths'] = json.loads(content.get('image_paths') or '[]')
+                except:
+                    content['image_paths'] = []
+                contents.append(content)
+            return contents
+    except Exception as e:
+        logger.error(f"获取内容列表失败: {e}")
+        return []
+
+
+def add_content(title: str, text_content: str = '', image_paths: List[str] = None) -> Optional[int]:
+    """添加新内容"""
+    try:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            image_paths_json = json.dumps(image_paths or [])
+            cursor.execute('''
+                INSERT INTO contents (title, text_content, image_paths)
+                VALUES (?, ?, ?)
+            ''', (title, text_content or '', image_paths_json))
+            conn.commit()
+            return cursor.lastrowid
+    except Exception as e:
+        logger.error(f"添加内容失败: {e}")
+        return None
+
+
+def get_content_by_id(content_id: int) -> Optional[Dict]:
+    """根据ID获取内容"""
+    try:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM contents WHERE id = ?', (content_id,))
+            row = cursor.fetchone()
+            if row:
+                content = dict(row)
+                try:
+                    content['image_paths'] = json.loads(content.get('image_paths') or '[]')
+                except:
+                    content['image_paths'] = []
+                return content
+            return None
+    except Exception as e:
+        logger.error(f"获取内容失败: {e}")
+        return None
+
+
+def update_content(content_id: int, title: str = None, text_content: str = None, image_paths: List[str] = None) -> bool:
+    """更新内容"""
+    try:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            updates = []
+            params = []
+            if title is not None:
+                updates.append('title = ?')
+                params.append(title)
+            if text_content is not None:
+                updates.append('text_content = ?')
+                params.append(text_content)
+            if image_paths is not None:
+                updates.append('image_paths = ?')
+                params.append(json.dumps(image_paths))
+            if not updates:
+                return False
+            updates.append('updated_at = CURRENT_TIMESTAMP')
+            params.append(content_id)
+            cursor.execute(f'UPDATE contents SET {", ".join(updates)} WHERE id = ?', params)
+            conn.commit()
+            return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f"更新内容失败: {e}")
+        return False
+
+
+def delete_content(content_id: int) -> bool:
+    """删除内容"""
+    try:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM contents WHERE id = ?', (content_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f"删除内容失败: {e}")
+        return False
+
+
+# ===== 账号频道配置方法 =====
+
+def get_account_channels(account_id: int) -> List[str]:
+    """获取账号配置的频道列表"""
+    try:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT channel_ids FROM discord_accounts WHERE id = ?', (account_id,))
+            row = cursor.fetchone()
+            if row and row['channel_ids']:
+                try:
+                    return json.loads(row['channel_ids'])
+                except:
+                    return []
+            return []
+    except Exception as e:
+        logger.error(f"获取账号频道配置失败: {e}")
+        return []
+
+
+def update_account_channels(account_id: int, channel_ids: List[str]) -> bool:
+    """更新账号的频道配置"""
+    try:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            channel_ids_json = json.dumps(channel_ids or [])
+            cursor.execute('''
+                UPDATE discord_accounts
+                SET channel_ids = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (channel_ids_json, account_id))
+            conn.commit()
+            return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f"更新账号频道配置失败: {e}")
+        return False
+
+
+# 为 Database 类添加内容管理方法别名
+Database.get_all_contents = lambda self: get_all_contents()
+Database.add_content = lambda self, title, text_content='', image_paths=None: add_content(title, text_content, image_paths)
+Database.get_content_by_id = lambda self, content_id: get_content_by_id(content_id)
+Database.update_content = lambda self, content_id, title=None, text_content=None, image_paths=None: update_content(content_id, title, text_content, image_paths)
+Database.delete_content = lambda self, content_id: delete_content(content_id)
+Database.get_account_channels = lambda self, account_id: get_account_channels(account_id)
+Database.update_account_channels = lambda self, account_id, channel_ids: update_account_channels(account_id, channel_ids)
