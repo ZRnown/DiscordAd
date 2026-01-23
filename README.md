@@ -97,3 +97,4 @@ DiscordSend/
 
 MIT
 # discordSend
+# DiscordAd
