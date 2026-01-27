@@ -258,45 +258,66 @@ async def auto_send_loop(
             task_status['next_account_index'] = bot_idx
             _persist_task_state(db)
 
-            try:
-                # 发送到所有配置的频道
-                for channel_id in channel_ids:
-                    channel = current_bot.get_channel(int(channel_id))
-                    if channel:
-                        # 发送文字内容
-                        if text_content:
-                            await channel.send(text_content)
+            # 发送到所有配置的频道
+            failed_channels = 0
+            for channel_id in channel_ids:
+                channel_label = str(channel_id).strip()
+                if not channel_label:
+                    continue
+                try:
+                    channel_id_int = int(channel_label)
+                except (TypeError, ValueError):
+                    failed_channels += 1
+                    logger.error(f"无效频道ID: {channel_label}")
+                    continue
 
-                        # 发送图片
-                        if image_paths:
-                            from config import config
-                            import discord
-                            content_images_dir = os.path.join(config.DATA_DIR, 'content_images')
-                            files = []
-                            for img_filename in image_paths:
-                                img_path = os.path.join(content_images_dir, img_filename)
-                                if os.path.exists(img_path):
-                                    files.append(discord.File(img_path))
-                            if files:
-                                await channel.send(files=files)
-                    else:
-                        logger.error(
-                            f"账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
-                            f"找不到频道 {channel_id}"
-                        )
+                channel = current_bot.get_channel(channel_id_int)
+                if not channel:
+                    failed_channels += 1
+                    logger.error(
+                        f"账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
+                        f"找不到频道 {channel_id_int}"
+                    )
+                    continue
 
-                task_status['sent_count'] += 1
-                task_status['last_sent_at'] = datetime.now().isoformat()
-                task_status['next_content_index'] = content_idx + 1
-                task_status['next_account_index'] = bot_idx + 1
-                _persist_task_state(db)
-                logger.info(
-                    f"✅ 账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
-                    f"发送成功 ({task_status['sent_count']}/{task_status['total_contents']}): {title[:30]}..."
+                try:
+                    # 发送文字内容
+                    if text_content:
+                        await channel.send(text_content)
+
+                    # 发送图片
+                    if image_paths:
+                        from config import config
+                        import discord
+                        content_images_dir = os.path.join(config.DATA_DIR, 'content_images')
+                        files = []
+                        for img_filename in image_paths:
+                            img_path = os.path.join(content_images_dir, img_filename)
+                            if os.path.exists(img_path):
+                                files.append(discord.File(img_path))
+                        if files:
+                            await channel.send(files=files)
+                except Exception as e:
+                    failed_channels += 1
+                    logger.error(
+                        f"账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
+                        f"频道 {channel_id_int} 发送失败: {e}"
+                    )
+
+            task_status['sent_count'] += 1
+            task_status['last_sent_at'] = datetime.now().isoformat()
+            task_status['next_content_index'] = content_idx + 1
+            task_status['next_account_index'] = bot_idx + 1
+            _persist_task_state(db)
+            if failed_channels:
+                logger.warning(
+                    f"账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
+                    f"本轮发送有失败频道 {failed_channels}/{len(channel_ids)}"
                 )
-            except Exception as e:
-                logger.error(f"发送失败: {e}")
-                # 继续下一条，不中断任务
+            logger.info(
+                f"✅ 账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
+                f"发送成功 ({task_status['sent_count']}/{task_status['total_contents']}): {title[:30]}..."
+            )
 
             # 索引递增
             content_idx += 1
