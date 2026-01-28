@@ -28,6 +28,7 @@ task_status = {
     'account_ids': [],
     'channel_ids': [],
     'rotation_mode': True,
+    'repeat_mode': True,
     'interval': None,
     'total_contents': 0,
     'sent_count': 0,
@@ -56,6 +57,7 @@ def reset_task_status():
         'account_ids': [],
         'channel_ids': [],
         'rotation_mode': True,
+        'repeat_mode': True,
         'interval': None,
         'total_contents': 0,
         'sent_count': 0,
@@ -77,6 +79,8 @@ def _persist_task_state(db) -> None:
             'is_paused': task_status.get('is_paused'),
             'shop_id': json.dumps(task_status.get('content_ids', [])),  # 复用 shop_id 字段存储 content_ids
             'channel_id': str(task_status.get('rotation_mode', True)),  # 复用 channel_id 字段存储 rotation_mode
+            'channel_ids': task_status.get('channel_ids', []),
+            'repeat_mode': bool(task_status.get('repeat_mode', True)),
             'account_ids': task_status.get('account_ids', []),
             'interval': task_status.get('interval'),
             'total_products': task_status.get('total_contents', 0),
@@ -126,14 +130,24 @@ def load_task_state(db) -> None:
 
     # 解析 rotation_mode（存储在 channel_id 字段）
     rotation_mode = state.get('channel_id', 'True').lower() != 'false'
+    channel_ids = []
+    try:
+        channel_ids = json.loads(state.get('channel_ids') or '[]')
+        if not isinstance(channel_ids, list):
+            channel_ids = []
+    except Exception:
+        channel_ids = []
+    repeat_mode = bool(state.get('repeat_mode', True))
 
     reset_task_status()
     task_status['content_ids'] = content_ids
     task_status['rotation_mode'] = rotation_mode
     task_status['account_ids'] = state.get('account_ids', [])
+    task_status['channel_ids'] = channel_ids
     task_status['interval'] = state.get('interval')
     task_status['total_contents'] = state.get('total_products', 0)
     task_status['sent_count'] = state.get('sent_count', 0)
+    task_status['repeat_mode'] = repeat_mode
     task_status['current_content'] = state.get('current_product')
     task_status['current_account'] = state.get('current_account')
     task_status['started_at'] = state.get('started_at')
@@ -154,6 +168,7 @@ async def auto_send_loop(
     selected_account_ids: List[int],
     channel_ids: List[str],
     rotation_mode: bool,
+    repeat_mode: bool,
     interval: int,
     db,
     bot_clients: List,
@@ -167,6 +182,7 @@ async def auto_send_loop(
     :param selected_account_ids: 用户勾选的 Account ID 列表
     :param channel_ids: 发送目标频道ID列表
     :param rotation_mode: 是否轮换模式
+    :param repeat_mode: 是否循环发送
     :param interval: 发送间隔（秒）
     :param db: 数据库实例
     :param bot_clients: 机器人客户端列表
@@ -178,6 +194,7 @@ async def auto_send_loop(
     task_status['content_ids'] = content_ids
     task_status['account_ids'] = selected_account_ids
     task_status['rotation_mode'] = rotation_mode
+    task_status['repeat_mode'] = repeat_mode
     task_status['interval'] = interval
     task_status['started_at'] = datetime.now().isoformat()
     task_status['error'] = None
@@ -185,7 +202,10 @@ async def auto_send_loop(
     task_status['next_account_index'] = max(0, start_account_index)
     _persist_task_state(db)
 
-    logger.info(f"启动自动发送: 内容数={len(content_ids)}，账号数={len(selected_account_ids)}，轮换模式={rotation_mode}，间隔{interval}s")
+    logger.info(
+        f"启动自动发送: 内容数={len(content_ids)}，账号数={len(selected_account_ids)}，"
+        f"轮换模式={rotation_mode}，循环发送={repeat_mode}，间隔{interval}s"
+    )
 
     try:
         # 1. 获取所有选中的内容
@@ -204,11 +224,15 @@ async def auto_send_loop(
         logger.info(f"待发送内容数: {len(contents)}")
 
         if task_status['next_content_index'] >= len(contents):
-            task_status['sent_count'] = len(contents)
-            task_status['current_content'] = None
-            _persist_task_state(db)
-            logger.info("内容已发送完毕，无需继续")
-            return
+            if repeat_mode:
+                task_status['next_content_index'] = 0
+                _persist_task_state(db)
+            else:
+                task_status['sent_count'] = len(contents)
+                task_status['current_content'] = None
+                _persist_task_state(db)
+                logger.info("内容已发送完毕，无需继续")
+                return
 
         # 2. 筛选出可用的在线 Bot 客户端
         active_bots = []
@@ -230,13 +254,20 @@ async def auto_send_loop(
 
         content_idx = task_status['next_content_index']
         bot_idx = task_status['next_account_index']
-        task_status['sent_count'] = content_idx
+        if task_status['sent_count'] < content_idx:
+            task_status['sent_count'] = content_idx
 
         # 3. 循环发送
         while not stop_sender_event.is_set():
             if content_idx >= len(contents):
-                logger.info("所有内容已发送完毕，任务结束")
-                break
+                if repeat_mode:
+                    logger.info("内容已发送完毕，开始新一轮")
+                    content_idx = 0
+                    task_status['next_content_index'] = 0
+                    _persist_task_state(db)
+                else:
+                    logger.info("所有内容已发送完毕，任务结束")
+                    break
 
             # 获取当前要发的内容
             content = contents[content_idx]
@@ -356,6 +387,7 @@ def start_sending_task(
     account_ids: List[int],
     channel_ids: List[str],
     rotation_mode: bool,
+    repeat_mode: bool,
     interval: int,
     db,
     bot_clients: List,
@@ -371,6 +403,7 @@ def start_sending_task(
     :param account_ids: 账号 ID 列表
     :param channel_ids: 发送目标频道 ID 列表
     :param rotation_mode: 是否轮换模式
+    :param repeat_mode: 是否循环发送
     :param interval: 发送间隔（秒）
     :param db: 数据库实例
     :param bot_clients: 机器人客户端列表
@@ -400,6 +433,7 @@ def start_sending_task(
     task_status['account_ids'] = account_ids
     task_status['channel_ids'] = channel_ids
     task_status['rotation_mode'] = rotation_mode
+    task_status['repeat_mode'] = repeat_mode
     task_status['interval'] = interval
     task_status['next_content_index'] = max(0, start_content_index)
     task_status['next_account_index'] = max(0, start_account_index)
@@ -414,6 +448,7 @@ def start_sending_task(
                 selected_account_ids=account_ids,
                 channel_ids=channel_ids,
                 rotation_mode=rotation_mode,
+                repeat_mode=repeat_mode,
                 interval=interval,
                 db=db,
                 bot_clients=bot_clients,
@@ -480,16 +515,19 @@ def resume_sending_task(db, bot_clients: List, bot_loop: asyncio.AbstractEventLo
 
     # 解析 rotation_mode
     rotation_mode = state.get('channel_id', 'True').lower() != 'false'
+    repeat_mode = bool(state.get('repeat_mode', True))
 
     account_ids = [int(item) for item in state.get('account_ids', [])]
+    channel_ids = [str(item).strip() for item in state.get('channel_ids', []) if str(item).strip()]
     if not _has_online_bots(bot_clients, account_ids):
         return {'success': False, 'error': '没有选中的账号在线，请先启动账号'}
 
     return start_sending_task(
         content_ids=content_ids,
         account_ids=account_ids,
-        channel_ids=task_status.get('channel_ids', []),
+        channel_ids=channel_ids,
         rotation_mode=rotation_mode,
+        repeat_mode=repeat_mode,
         interval=int(state.get('interval') or 60),
         db=db,
         bot_clients=bot_clients,

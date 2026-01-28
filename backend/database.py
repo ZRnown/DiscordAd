@@ -313,6 +313,8 @@ class Database:
                     is_paused INTEGER DEFAULT 0,
                     shop_id INTEGER,
                     channel_id TEXT,
+                    channel_ids TEXT,
+                    repeat_mode INTEGER DEFAULT 0,
                     account_ids TEXT,
                     interval INTEGER DEFAULT 60,
                     total_products INTEGER DEFAULT 0,
@@ -331,6 +333,18 @@ class Database:
                 INSERT OR IGNORE INTO sender_task_state (id)
                 VALUES (1)
             ''')
+
+            # 为sender_task_state表添加repeat_mode字段
+            try:
+                cursor.execute('ALTER TABLE sender_task_state ADD COLUMN repeat_mode INTEGER DEFAULT 0')
+            except sqlite3.OperationalError:
+                pass  # 字段已存在
+
+            # 为sender_task_state表添加channel_ids字段
+            try:
+                cursor.execute('ALTER TABLE sender_task_state ADD COLUMN channel_ids TEXT')
+            except sqlite3.OperationalError:
+                pass  # 字段已存在
 
             # 创建网站配置表
             cursor.execute('''
@@ -2637,6 +2651,8 @@ class Database:
                         is_paused,
                         shop_id,
                         channel_id,
+                        channel_ids,
+                        repeat_mode,
                         account_ids,
                         interval,
                         total_products,
@@ -2659,6 +2675,11 @@ class Database:
                     data['account_ids'] = json.loads(account_ids)
                 except Exception:
                     data['account_ids'] = []
+                channel_ids = data.get('channel_ids') or '[]'
+                try:
+                    data['channel_ids'] = json.loads(channel_ids)
+                except Exception:
+                    data['channel_ids'] = []
                 return data
         except Exception as e:
             logger.error(f"获取任务状态失败: {e}")
@@ -2671,6 +2692,8 @@ class Database:
                 cursor = conn.cursor()
                 account_ids = state.get('account_ids', [])
                 account_ids_json = json.dumps(account_ids or [])
+                channel_ids = state.get('channel_ids', [])
+                channel_ids_json = json.dumps(channel_ids or [])
                 cursor.execute('''
                     UPDATE sender_task_state
                     SET
@@ -2678,6 +2701,8 @@ class Database:
                         is_paused = ?,
                         shop_id = ?,
                         channel_id = ?,
+                        channel_ids = ?,
+                        repeat_mode = ?,
                         account_ids = ?,
                         interval = ?,
                         total_products = ?,
@@ -2695,6 +2720,8 @@ class Database:
                     1 if state.get('is_paused') else 0,
                     state.get('shop_id'),
                     state.get('channel_id'),
+                    channel_ids_json,
+                    1 if state.get('repeat_mode') else 0,
                     account_ids_json,
                     state.get('interval'),
                     state.get('total_products', 0),
@@ -2724,6 +2751,8 @@ class Database:
                         is_paused = 0,
                         shop_id = NULL,
                         channel_id = NULL,
+                        channel_ids = NULL,
+                        repeat_mode = 0,
                         account_ids = NULL,
                         interval = 60,
                         total_products = 0,

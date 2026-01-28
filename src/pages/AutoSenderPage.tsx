@@ -21,7 +21,9 @@ interface TaskStatus {
   is_paused: boolean
   content_ids: number[]
   account_ids: number[]
+  channel_ids?: string[]
   rotation_mode: boolean
+  repeat_mode: boolean
   total_contents: number
   sent_count: number
   current_content: string | null
@@ -32,6 +34,32 @@ interface TaskStatus {
 }
 
 const API_BASE = 'http://127.0.0.1:5001/api'
+const CHANNEL_IDS_STORAGE_KEY = 'discord-auto-sender.channel-ids.v1'
+
+const loadChannelIds = () => {
+  if (typeof window === 'undefined') {
+    return ''
+  }
+  try {
+    return localStorage.getItem(CHANNEL_IDS_STORAGE_KEY) ?? ''
+  } catch (error) {
+    return ''
+  }
+}
+
+const saveChannelIds = (value: string) => {
+  if (typeof window === 'undefined') {
+    return
+  }
+  try {
+    if (value) {
+      localStorage.setItem(CHANNEL_IDS_STORAGE_KEY, value)
+    } else {
+      localStorage.removeItem(CHANNEL_IDS_STORAGE_KEY)
+    }
+  } catch (error) {
+  }
+}
 
 export default function AutoSenderPage() {
   const [contents, setContents] = useState<Content[]>([])
@@ -43,9 +71,11 @@ export default function AutoSenderPage() {
   const [selectedContents, setSelectedContents] = useState<number[]>([])
   const [selectedAccounts, setSelectedAccounts] = useState<number[]>([])
   const [rotationMode, setRotationMode] = useState(true)
+  const [repeatMode, setRepeatMode] = useState(true)
   const [sendInterval, setSendInterval] = useState('60')
-  const [channelIds, setChannelIds] = useState('')
+  const [channelIds, setChannelIds] = useState(loadChannelIds)
   const [loading, setLoading] = useState(false)
+  const channelInitRef = useRef(false)
 
   // 获取内容和账号数据
   const fetchData = async () => {
@@ -98,12 +128,13 @@ export default function AutoSenderPage() {
       return
     }
     const previousStatus = previousStatusRef.current
+    const repeatEnabled = status.repeat_mode ?? false
     if (previousStatus?.is_running && !status.is_running) {
       if (status.error) {
         toast.error(`任务异常: ${status.error}`)
       } else if (status.is_paused) {
         toast.success('任务已暂停')
-      } else if (status.total_contents > 0 && status.sent_count >= status.total_contents) {
+      } else if (!repeatEnabled && status.total_contents > 0 && status.sent_count >= status.total_contents) {
         toast.success('任务已完成')
       } else {
         toast.success('任务已停止')
@@ -111,6 +142,25 @@ export default function AutoSenderPage() {
     }
     previousStatusRef.current = status
   }, [status])
+
+  useEffect(() => {
+    saveChannelIds(channelIds.trim())
+  }, [channelIds])
+
+  useEffect(() => {
+    if (channelInitRef.current || !status) {
+      return
+    }
+    if (channelIds.trim()) {
+      channelInitRef.current = true
+      return
+    }
+    if (status.channel_ids && status.channel_ids.length > 0) {
+      setChannelIds(status.channel_ids.join('\n'))
+      channelInitRef.current = true
+      return
+    }
+  }, [status, channelIds])
 
   const toggleContent = (id: number) => {
     setSelectedContents((prev) =>
@@ -189,6 +239,7 @@ export default function AutoSenderPage() {
           accountIds: selectedAccounts,
           channelIds: channels,
           rotationMode,
+          repeatMode,
           interval: parseInt(sendInterval)
         })
       })
@@ -262,6 +313,7 @@ export default function AutoSenderPage() {
 
   const isRunning = status?.is_running || false
   const isPaused = status?.is_paused || false
+  const repeatEnabled = status?.repeat_mode ?? false
 
   return (
     <div className="space-y-6">
@@ -369,6 +421,42 @@ export default function AutoSenderPage() {
               </div>
               <p className="mt-1 text-xs text-gray-500">
                 {rotationMode ? '多账号轮流发送' : '只用一个账号发送'}
+              </p>
+            </div>
+
+            {/* 发送方式 */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                发送方式
+              </label>
+              <div className="flex gap-4">
+                <button
+                  onClick={() => setRepeatMode(true)}
+                  disabled={isRunning || isPaused}
+                  className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg border transition-colors ${
+                    repeatMode
+                      ? 'bg-blue-50 border-blue-300 text-blue-700'
+                      : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
+                  } disabled:opacity-50`}
+                >
+                  <ToggleRight size={18} />
+                  循环发送
+                </button>
+                <button
+                  onClick={() => setRepeatMode(false)}
+                  disabled={isRunning || isPaused}
+                  className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg border transition-colors ${
+                    !repeatMode
+                      ? 'bg-blue-50 border-blue-300 text-blue-700'
+                      : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
+                  } disabled:opacity-50`}
+                >
+                  <ToggleLeft size={18} />
+                  发送一次
+                </button>
+              </div>
+              <p className="mt-1 text-xs text-gray-500">
+                {repeatMode ? '内容发送完会从头开始' : '全部内容发送完后自动停止'}
               </p>
             </div>
 
@@ -502,15 +590,18 @@ export default function AutoSenderPage() {
               </p>
             </div>
             <div>
-              <p className="text-sm text-gray-500">进度</p>
+              <p className="text-sm text-gray-500">{repeatEnabled ? '累计发送' : '进度'}</p>
               <p className="font-medium text-gray-800">
-                {status.sent_count} / {status.total_contents}
+                {repeatEnabled
+                  ? status.sent_count
+                  : `${status.sent_count} / ${status.total_contents}`}
               </p>
             </div>
             <div>
               <p className="text-sm text-gray-500">发送模式</p>
               <p className="font-medium text-gray-800">
-                {status.rotation_mode ? '轮换模式' : '单账号模式'}
+                {status.rotation_mode ? '轮换模式' : '单账号模式'} ·{' '}
+                {repeatEnabled ? '循环发送' : '发送一次'}
               </p>
             </div>
             <div>

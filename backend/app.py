@@ -341,6 +341,7 @@ def start_sender():
         account_ids = data.get('accountIds', [])
         channel_ids = data.get('channelIds', [])
         rotation_mode = data.get('rotationMode', True)  # 默认轮换模式
+        repeat_mode = data.get('repeatMode', True)  # 默认循环发送
         interval = data.get('interval', config.DEFAULT_SEND_INTERVAL)
 
         # 参数验证
@@ -363,6 +364,7 @@ def start_sender():
             account_ids=[int(id) for id in account_ids],
             channel_ids=[str(c).strip() for c in channel_ids if str(c).strip()],
             rotation_mode=rotation_mode,
+            repeat_mode=bool(repeat_mode),
             interval=int(interval),
             db=db,
             bot_clients=bot_clients,
