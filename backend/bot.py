@@ -348,6 +348,8 @@ class DiscordBotClient(discord.Client):
                 self.current_token = token
                 try:
                     await start_task
+                except asyncio.CancelledError:
+                    logger.warning(f'账号 {self.account_id} 连接被取消')
                 except Exception as e:
                     logger.error(f'账号 {self.account_id} 运行中断: {e}')
                 if self.stop_requested:
@@ -376,14 +378,14 @@ class DiscordBotClient(discord.Client):
                 start_task.cancel()
                 try:
                     await start_task
-                except Exception:
+                except (Exception, asyncio.CancelledError):
                     pass
 
             if not login_task.done():
                 login_task.cancel()
                 try:
                     await login_task
-                except Exception:
+                except (Exception, asyncio.CancelledError):
                     pass
 
             try:
@@ -401,7 +403,10 @@ class DiscordBotClient(discord.Client):
         logger.info(f'账号 {self.account_id} 已连接到 Discord 网关')
 
     async def on_disconnect(self):
-        logger.warning(f'账号 {self.account_id} 连接断开')
+        if self.stop_requested:
+            logger.info(f'账号 {self.account_id} 已主动断开连接')
+        else:
+            logger.warning(f'账号 {self.account_id} 连接断开，将自动重连...')
 
     async def on_resumed(self):
         logger.info(f'账号 {self.account_id} 连接已恢复')

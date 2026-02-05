@@ -259,6 +259,16 @@ async def auto_send_loop(
 
         # 3. 循环发送
         while not stop_sender_event.is_set():
+            # 动态检查可用的 bot（过滤掉已断开的）
+            active_bots = [
+                c for c in active_bots
+                if c.is_ready() and not c.is_closed()
+            ]
+            if not active_bots:
+                task_status['error'] = "所有账号已断开连接，任务停止"
+                logger.error(task_status['error'])
+                break
+
             if content_idx >= len(contents):
                 if repeat_mode:
                     logger.info("内容已发送完毕，开始新一轮")
@@ -312,11 +322,14 @@ async def auto_send_loop(
                     continue
 
                 try:
-                    # 发送文字内容
+                    # 发送文字内容（带超时保护）
                     if text_content:
-                        await channel.send(text_content)
+                        await asyncio.wait_for(
+                            channel.send(text_content),
+                            timeout=30.0
+                        )
 
-                    # 发送图片
+                    # 发送图片（带超时保护）
                     if image_paths:
                         from config import config
                         import discord
@@ -327,7 +340,16 @@ async def auto_send_loop(
                             if os.path.exists(img_path):
                                 files.append(discord.File(img_path))
                         if files:
-                            await channel.send(files=files)
+                            await asyncio.wait_for(
+                                channel.send(files=files),
+                                timeout=60.0
+                            )
+                except asyncio.TimeoutError:
+                    failed_channels += 1
+                    logger.error(
+                        f"账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
+                        f"频道 {channel_id_int} 发送超时"
+                    )
                 except Exception as e:
                     failed_channels += 1
                     logger.error(
