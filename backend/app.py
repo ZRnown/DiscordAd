@@ -14,6 +14,8 @@ import requests
 import sqlite3
 import os
 import json
+from datetime import datetime
+from collections import deque
 from typing import Dict, List, Optional
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
@@ -50,6 +52,39 @@ load_task_state(db)
 # Discord bot 事件循环（在单独线程中运行）
 bot_loop: asyncio.AbstractEventLoop = None
 bot_thread: threading.Thread = None
+
+# 简易日志缓冲区（内存）
+log_buffer = deque(maxlen=1000)
+log_seq = 0
+log_lock = threading.Lock()
+
+
+def _append_log(log_data: Dict) -> Dict:
+    global log_seq
+    with log_lock:
+        log_seq += 1
+        entry = {'id': log_seq, **log_data}
+        log_buffer.append(entry)
+        return entry
+
+
+def _should_store_log(level: str, message: str, module: str) -> bool:
+    level_upper = (level or '').upper()
+    if level_upper in {'ERROR', 'WARNING'}:
+        return True
+
+    msg = message or ''
+    mod = module or ''
+
+    # 登录/连接日志（仅 bot 模块）
+    if mod == 'bot' and any(keyword in msg for keyword in ['登录', '连接', '断开', '已恢复']):
+        return True
+
+    # 发送进度（仅 auto_sender 模块）
+    if mod == 'auto_sender' and '发送进度' in msg:
+        return True
+
+    return False
 
 
 # ============== 许可证 API ==============
@@ -108,6 +143,15 @@ def add_log():
         module = data.get('module', '')
         func = data.get('func', '')
         level = data.get('level', 'INFO')
+        timestamp = data.get('timestamp', datetime.now().isoformat())
+        if _should_store_log(level, message, module):
+            _append_log({
+                'timestamp': timestamp,
+                'level': level,
+                'message': message,
+                'module': module,
+                'func': func
+            })
         logger.info("BOT_LOG [%s] %s %s %s", level, module, func, message)
         return jsonify({'success': True})
     except Exception as e:
@@ -115,10 +159,29 @@ def add_log():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/logs/list', methods=['GET'])
+def list_logs():
+    """获取日志列表"""
+    try:
+        since = request.args.get('since', type=int) or 0
+        limit = request.args.get('limit', type=int) or 200
+        with log_lock:
+            if since:
+                logs = [entry for entry in log_buffer if entry.get('id', 0) > since]
+            else:
+                logs = list(log_buffer)
+        if limit and len(logs) > limit:
+            logs = logs[-limit:]
+        return jsonify({'success': True, 'logs': logs})
+    except Exception as e:
+        logger.error(f"获取日志失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/logs/stream', methods=['GET'])
 def stream_logs():
     """日志流占位（兼容旧前端）"""
-    return jsonify({'success': True, 'logs': []})
+    return list_logs()
 
 
 def fetch_discord_username(token: str) -> str:

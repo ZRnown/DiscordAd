@@ -15,6 +15,8 @@ import json
 from typing import List, Dict, Optional
 from datetime import datetime
 
+from config import config
+
 logger = logging.getLogger(__name__)
 
 # 全局变量控制任务状态
@@ -40,6 +42,18 @@ task_status = {
     'next_content_index': 0,
     'next_account_index': 0
 }
+
+
+async def _send_with_timeout(coro, timeout: int, label: str) -> bool:
+    try:
+        await asyncio.wait_for(coro, timeout=timeout)
+        return True
+    except asyncio.TimeoutError:
+        logger.error(f"{label} 发送超时({timeout}s)")
+        return False
+    except Exception as e:
+        logger.error(f"{label} 发送失败: {e}")
+        return False
 
 
 def get_task_status() -> Dict:
@@ -301,6 +315,9 @@ async def auto_send_loop(
 
             # 发送到所有配置的频道
             failed_channels = 0
+            any_success = False
+            text_timeout = int(getattr(config, 'AUTO_SENDER_TEXT_TIMEOUT', 30))
+            image_timeout = int(getattr(config, 'AUTO_SENDER_IMAGE_TIMEOUT', 60))
             for channel_id in channel_ids:
                 channel_label = str(channel_id).strip()
                 if not channel_label:
@@ -321,55 +338,70 @@ async def auto_send_loop(
                     )
                     continue
 
-                try:
-                    # 发送文字内容（带超时保护）
-                    if text_content:
-                        await asyncio.wait_for(
-                            channel.send(text_content),
-                            timeout=30.0
-                        )
+                channel_failed = False
+                channel_success = False
+                sent_text = False
+                sent_images = False
+                if text_content:
+                    label = (
+                        f"账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
+                        f"频道 {channel_id_int} 文本"
+                    )
+                    if await _send_with_timeout(channel.send(text_content), text_timeout, label):
+                        channel_success = True
+                        sent_text = True
+                    else:
+                        channel_failed = True
 
-                    # 发送图片（带超时保护）
-                    if image_paths:
-                        from config import config
-                        import discord
-                        content_images_dir = os.path.join(config.DATA_DIR, 'content_images')
-                        files = []
-                        for img_filename in image_paths:
-                            img_path = os.path.join(content_images_dir, img_filename)
-                            if os.path.exists(img_path):
-                                files.append(discord.File(img_path))
-                        if files:
-                            await asyncio.wait_for(
-                                channel.send(files=files),
-                                timeout=60.0
-                            )
-                except asyncio.TimeoutError:
+                if not channel_failed and image_paths:
+                    import discord
+                    content_images_dir = os.path.join(config.DATA_DIR, 'content_images')
+                    files = []
+                    for img_filename in image_paths:
+                        img_path = os.path.join(content_images_dir, img_filename)
+                        if os.path.exists(img_path):
+                            files.append(discord.File(img_path))
+                    if files:
+                        label = (
+                            f"账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
+                            f"频道 {channel_id_int} 图片"
+                        )
+                        if await _send_with_timeout(channel.send(files=files), image_timeout, label):
+                            channel_success = True
+                            sent_images = True
+                        else:
+                            channel_failed = True
+
+                if channel_failed:
                     failed_channels += 1
-                    logger.error(
-                        f"账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
-                        f"频道 {channel_id_int} 发送超时"
-                    )
-                except Exception as e:
-                    failed_channels += 1
-                    logger.error(
-                        f"账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
-                        f"频道 {channel_id_int} 发送失败: {e}"
-                    )
+                if channel_success:
+                    any_success = True
 
             task_status['sent_count'] += 1
-            task_status['last_sent_at'] = datetime.now().isoformat()
+            if any_success:
+                task_status['last_sent_at'] = datetime.now().isoformat()
             task_status['next_content_index'] = content_idx + 1
             task_status['next_account_index'] = bot_idx + 1
             _persist_task_state(db)
+            if not any_success:
+                logger.warning(
+                    f"账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
+                    f"本轮所有频道发送失败"
+                )
             if failed_channels:
                 logger.warning(
                     f"账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
                     f"本轮发送有失败频道 {failed_channels}/{len(channel_ids)}"
                 )
+            if repeat_mode:
+                progress_text = f"发送进度(累计): {task_status['sent_count']}"
+            else:
+                progress_text = (
+                    f"发送进度: {task_status['sent_count']}/{task_status['total_contents']}"
+                )
             logger.info(
-                f"✅ 账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
-                f"发送成功 ({task_status['sent_count']}/{task_status['total_contents']}): {title[:30]}..."
+                f"{progress_text} | 账号 "
+                f"{current_bot.user.name if current_bot.user else 'Unknown'} | 内容: {title[:30]}"
             )
 
             # 索引递增

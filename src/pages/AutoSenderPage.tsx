@@ -16,6 +16,15 @@ interface Account {
   channel_ids?: string[]
 }
 
+interface LogEntry {
+  id: number
+  timestamp: string
+  level: string
+  message: string
+  module: string
+  func: string
+}
+
 interface TaskStatus {
   is_running: boolean
   is_paused: boolean
@@ -35,6 +44,7 @@ interface TaskStatus {
 
 const API_BASE = 'http://127.0.0.1:5001/api'
 const CHANNEL_IDS_STORAGE_KEY = 'discord-auto-sender.channel-ids.v1'
+const LOGS_LIMIT = 500
 
 const loadChannelIds = () => {
   if (typeof window === 'undefined') {
@@ -65,7 +75,9 @@ export default function AutoSenderPage() {
   const [contents, setContents] = useState<Content[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
   const [status, setStatus] = useState<TaskStatus | null>(null)
+  const [logs, setLogs] = useState<LogEntry[]>([])
   const previousStatusRef = useRef<TaskStatus | null>(null)
+  const lastLogIdRef = useRef(0)
 
   // 表单状态
   const [selectedContents, setSelectedContents] = useState<number[]>([])
@@ -80,15 +92,17 @@ export default function AutoSenderPage() {
   // 获取内容和账号数据
   const fetchData = async () => {
     try {
-      const [contentsRes, accountsRes, statusRes] = await Promise.all([
+      const [contentsRes, accountsRes, statusRes, logsRes] = await Promise.all([
         fetch(`${API_BASE}/contents`),
         fetch(`${API_BASE}/accounts`),
-        fetch(`${API_BASE}/sender/status`)
+        fetch(`${API_BASE}/sender/status`),
+        fetch(`${API_BASE}/logs/list?since=${lastLogIdRef.current}`)
       ])
 
       const contentsData = await contentsRes.json()
       const accountsData = await accountsRes.json()
       const statusData = await statusRes.json()
+      const logsData = await logsRes.json()
 
       if (contentsData.success) {
         setContents(contentsData.contents || [])
@@ -102,6 +116,18 @@ export default function AutoSenderPage() {
       }
       if (statusData.success) {
         setStatus(statusData.status)
+      }
+      if (logsData.success && Array.isArray(logsData.logs)) {
+        if (logsData.logs.length > 0) {
+          setLogs((prev) => {
+            const next = [...prev, ...logsData.logs]
+            return next.length > LOGS_LIMIT ? next.slice(-LOGS_LIMIT) : next
+          })
+          const last = logsData.logs[logsData.logs.length - 1]
+          if (last?.id) {
+            lastLogIdRef.current = last.id
+          }
+        }
       }
     } catch (error) {
       console.error('获取数据失败:', error)
@@ -314,6 +340,16 @@ export default function AutoSenderPage() {
   const isRunning = status?.is_running || false
   const isPaused = status?.is_paused || false
   const repeatEnabled = status?.repeat_mode ?? false
+  const getLevelClass = (level: string) => {
+    const normalized = level?.toUpperCase()
+    if (normalized === 'ERROR') {
+      return 'bg-red-50 text-red-600'
+    }
+    if (normalized === 'WARNING') {
+      return 'bg-amber-50 text-amber-700'
+    }
+    return 'bg-gray-50 text-gray-600'
+  }
 
   return (
     <div className="space-y-6">
@@ -630,6 +666,43 @@ export default function AutoSenderPage() {
           )}
         </div>
       )}
+
+      {/* 发送日志 */}
+      <div className="bg-white rounded-lg border p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-bold text-gray-800">发送日志</h3>
+          <span className="text-xs text-gray-500">最多显示 {LOGS_LIMIT} 条</span>
+        </div>
+        {logs.length === 0 ? (
+          <div className="text-sm text-gray-500">暂无日志</div>
+        ) : (
+          <div className="max-h-[300px] overflow-y-auto space-y-2">
+            {logs.map((log) => (
+              <div
+                key={log.id}
+                className="flex items-start gap-3 p-2 rounded-lg bg-gray-50"
+              >
+                <span
+                  className={`text-xs px-2 py-1 rounded ${getLevelClass(log.level)}`}
+                >
+                  {log.level || 'INFO'}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs text-gray-500">
+                    {log.timestamp ? new Date(log.timestamp).toLocaleString() : '-'}
+                  </div>
+                  <div className="text-sm text-gray-800 break-words">{log.message}</div>
+                  {(log.module || log.func) && (
+                    <div className="text-xs text-gray-400">
+                      {log.module || '-'} {log.func || ''}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
