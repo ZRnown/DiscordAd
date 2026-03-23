@@ -1,10 +1,19 @@
 import { useState, useEffect, useRef } from 'react'
 import { toast } from 'sonner'
 import { Play, Square, RefreshCw, CheckCircle, Circle, ToggleLeft, ToggleRight } from 'lucide-react'
+import { API_BASE } from '../lib/api'
+import {
+  ContentSendMode,
+  getContentSendModeMeta,
+  normalizeContentSendMode
+} from '../lib/contentSendMode'
 
 interface Content {
   id: number
   title: string
+  send_mode?: ContentSendMode
+  forum_post_title?: string | null
+  forum_tags?: string[]
   text_content: string
   image_paths: string[]
 }
@@ -42,7 +51,6 @@ interface TaskStatus {
   error: string | null
 }
 
-const API_BASE = 'http://127.0.0.1:5001/api'
 const CHANNEL_IDS_STORAGE_KEY = 'discord-auto-sender.channel-ids.v1'
 const LOGS_LIMIT = 500
 
@@ -251,7 +259,7 @@ export default function AutoSenderPage() {
       .map((c) => c.trim())
       .filter(Boolean)
     if (channels.length === 0) {
-      toast.error('请输入至少一个频道ID')
+      toast.error('请输入至少一个频道或帖子目标')
       return
     }
 
@@ -351,6 +359,38 @@ export default function AutoSenderPage() {
     return 'bg-gray-50 text-gray-600'
   }
 
+  const selectedContentItems = contents.filter((content) =>
+    selectedContents.includes(content.id)
+  )
+  const selectedDirectCount = selectedContentItems.filter(
+    (content) => normalizeContentSendMode(content.send_mode) === 'direct'
+  ).length
+  const selectedPostCount = selectedContentItems.filter(
+    (content) => normalizeContentSendMode(content.send_mode) === 'post'
+  ).length
+
+  let targetNoticeClass = 'border-gray-200 bg-gray-50 text-gray-700'
+  let targetNoticeTitle = '先选择内容'
+  let targetNoticeDescription =
+    '每条内容都带自己的发送类型。选中后，这里会告诉你该填普通频道、已存在帖子，还是论坛频道。'
+
+  if (selectedDirectCount > 0 && selectedPostCount > 0) {
+    targetNoticeClass = 'border-amber-200 bg-amber-50 text-amber-800'
+    targetNoticeTitle = '当前选中了两种发送类型'
+    targetNoticeDescription =
+      '直接发送请填写普通频道 ID，或已存在帖子的链接/ID；新建帖子请填写论坛频道 ID。混合发送时，目标必须和内容类型对应。'
+  } else if (selectedPostCount > 0) {
+    targetNoticeClass = 'border-indigo-200 bg-indigo-50 text-indigo-700'
+    targetNoticeTitle = '当前内容会新建帖子'
+    targetNoticeDescription =
+      '这里填写论坛频道 ID 即可。系统会在该论坛频道下创建一个新帖子，不需要额外再选帖子类型；帖子标题默认使用内容标题，也可以在内容管理里单独设置，帖子标签也可以留空。'
+  } else if (selectedDirectCount > 0) {
+    targetNoticeClass = 'border-slate-200 bg-slate-50 text-slate-700'
+    targetNoticeTitle = '当前内容会直接发送'
+    targetNoticeDescription =
+      '这里可以填写普通频道 ID，或者已存在帖子的链接/ID。填普通频道就是直接发消息，填已存在帖子就是发到那个帖子里。'
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -381,40 +421,70 @@ export default function AutoSenderPage() {
               {allContentsSelected ? '全不选' : '全选'}
             </button>
           </div>
+          <p className="mb-3 text-xs text-gray-500">
+            {selectedContents.length > 0
+              ? `已选 ${selectedContents.length} 条，直接发送 ${selectedDirectCount} 条，新建帖子 ${selectedPostCount} 条`
+              : '每条内容都自带发送类型，右侧会按所选内容提示目标填写方式。'}
+          </p>
 
           {contents.length === 0 ? (
             <div className="text-center py-8 text-gray-500">
               暂无内容，请先在内容管理页面添加
             </div>
           ) : (
-            <div className="space-y-2 max-h-[300px] overflow-y-auto">
-              {contents.map((content) => (
-                <div
-                  key={content.id}
-                  onClick={() => !(isRunning || isPaused) && toggleContent(content.id)}
-                  className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-colors ${
-                    selectedContents.includes(content.id)
-                      ? 'bg-blue-50 border-blue-200 border'
-                      : 'bg-gray-50 hover:bg-gray-100'
-                  } ${isRunning || isPaused ? 'opacity-50 cursor-not-allowed' : ''}`}
-                >
-                  {selectedContents.includes(content.id) ? (
-                    <CheckCircle size={20} className="text-blue-600 flex-shrink-0" />
-                  ) : (
-                    <Circle size={20} className="text-gray-400 flex-shrink-0" />
-                  )}
-                  <div className="flex-1 min-w-0">
-                    <span className="font-medium text-gray-800 block truncate">
-                      {content.title}
-                    </span>
-                    {content.text_content && (
-                      <span className="text-xs text-gray-500 block truncate">
-                        {content.text_content.substring(0, 50)}...
-                      </span>
+            <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+              {contents.map((content) => {
+                const modeMeta = getContentSendModeMeta(content.send_mode)
+                const customPostTitle = content.forum_post_title?.trim()
+
+                return (
+                  <div
+                    key={content.id}
+                    onClick={() => !(isRunning || isPaused) && toggleContent(content.id)}
+                    className={`flex items-start gap-3 p-4 min-h-[112px] rounded-lg cursor-pointer transition-colors ${
+                      selectedContents.includes(content.id)
+                        ? 'bg-blue-50 border-blue-200 border'
+                        : 'bg-gray-50 hover:bg-gray-100'
+                    } ${isRunning || isPaused ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    {selectedContents.includes(content.id) ? (
+                      <CheckCircle size={20} className="text-blue-600 flex-shrink-0 mt-1" />
+                    ) : (
+                      <Circle size={20} className="text-gray-400 flex-shrink-0 mt-1" />
                     )}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-start gap-2">
+                        <span className="font-medium text-gray-800 block truncate flex-1 leading-6">
+                          {content.title}
+                        </span>
+                        <span
+                          className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${modeMeta.badgeClass}`}
+                        >
+                          {modeMeta.label}
+                        </span>
+                      </div>
+                      <span className="text-xs text-gray-500 block mt-2 leading-5">
+                        目标要求：{modeMeta.targetLabel}
+                      </span>
+                      {normalizeContentSendMode(content.send_mode) === 'post' && (
+                        <>
+                          <span className="text-xs text-gray-500 block mt-1 leading-5">
+                            帖子标题：{customPostTitle || '使用内容标题'}
+                          </span>
+                          <span className="text-xs text-gray-500 block mt-1 leading-5">
+                            帖子标签：{content.forum_tags && content.forum_tags.length > 0 ? content.forum_tags.join('、') : '不设置'}
+                          </span>
+                        </>
+                      )}
+                      {content.text_content && (
+                        <span className="text-xs text-gray-500 block mt-1 line-clamp-2 leading-5">
+                          {content.text_content.substring(0, 50)}...
+                        </span>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>
@@ -516,17 +586,23 @@ export default function AutoSenderPage() {
             {/* 频道配置 */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                发送频道 ID
+                发送目标
               </label>
               <textarea
                 value={channelIds}
                 onChange={(e) => setChannelIds(e.target.value)}
                 disabled={isRunning || isPaused}
-                placeholder="输入频道ID，每行一个或用逗号分隔"
+                placeholder="输入普通频道ID、论坛频道ID、已存在帖子链接/ID，每行一个或用逗号分隔"
                 rows={3}
                 className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 text-sm"
               />
-              <p className="mt-1 text-xs text-gray-500">所有账号都会向这些频道发送</p>
+              <div className={`mt-2 rounded-lg border px-3 py-2 text-xs ${targetNoticeClass}`}>
+                <p className="font-medium">{targetNoticeTitle}</p>
+                <p className="mt-1 leading-5">{targetNoticeDescription}</p>
+              </div>
+              <p className="mt-2 text-xs text-gray-500">
+                目标可以一行一个，也可以用逗号分隔。直接发送支持普通频道和已存在帖子；新建帖子只需要论坛频道 ID。
+              </p>
             </div>
 
             {/* 操作按钮 */}

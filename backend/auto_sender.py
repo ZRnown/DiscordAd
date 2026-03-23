@@ -12,8 +12,10 @@ import asyncio
 import logging
 import os
 import json
+import re
 from typing import List, Dict, Optional
 from datetime import datetime
+from urllib.parse import urlparse
 
 from config import config
 
@@ -29,6 +31,7 @@ task_status = {
     'content_ids': [],
     'account_ids': [],
     'channel_ids': [],
+    'post_title': None,
     'rotation_mode': True,
     'repeat_mode': True,
     'interval': None,
@@ -42,6 +45,329 @@ task_status = {
     'next_content_index': 0,
     'next_account_index': 0
 }
+
+
+def parse_send_target_id(raw_target: object) -> Optional[int]:
+    """解析发送目标，支持频道ID、帖子/线程ID、频道提及和 Discord URL。"""
+    if raw_target is None:
+        return None
+
+    target_text = str(raw_target).strip()
+    if not target_text:
+        return None
+
+    if target_text.isdigit():
+        return int(target_text)
+
+    mention_match = re.fullmatch(r'<#(\d+)>', target_text)
+    if mention_match:
+        return int(mention_match.group(1))
+
+    parsed = urlparse(target_text)
+    if parsed.scheme and parsed.netloc:
+        path_parts = [part for part in parsed.path.split('/') if part]
+        if len(path_parts) >= 3 and path_parts[0] == 'channels' and path_parts[2].isdigit():
+            return int(path_parts[2])
+
+    fallback_match = re.search(r'(?<!\d)(\d{15,25})(?!\d)', target_text)
+    if fallback_match:
+        return int(fallback_match.group(1))
+
+    return None
+
+
+async def resolve_send_target(client, raw_target: object):
+    """解析并获取可发送的 Discord 目标，兼容普通频道和论坛帖子线程。"""
+    target_id = parse_send_target_id(raw_target)
+    if client is None or target_id is None:
+        return None
+
+    get_channel = getattr(client, 'get_channel', None)
+    if callable(get_channel):
+        target = get_channel(target_id)
+        if target is not None:
+            return target
+
+    get_channel_or_thread = getattr(client, 'get_channel_or_thread', None)
+    if callable(get_channel_or_thread):
+        target = get_channel_or_thread(target_id)
+        if target is not None:
+            return target
+
+    fetch_channel = getattr(client, 'fetch_channel', None)
+    if callable(fetch_channel):
+        try:
+            return await fetch_channel(target_id)
+        except Exception as exc:
+            logger.warning(f"获取发送目标失败: {raw_target} -> {target_id} | {exc}")
+
+    return None
+
+
+def _is_forum_channel(target) -> bool:
+    """判断目标是否是论坛频道。"""
+    if target is None:
+        return False
+
+    channel_type = getattr(target, 'type', None)
+    channel_type_name = getattr(channel_type, 'name', None)
+    if channel_type_name and str(channel_type_name).lower() == 'forum':
+        return True
+
+    if getattr(target, 'available_tags', None) is not None and callable(getattr(target, 'create_thread', None)):
+        return True
+
+    cls_name = target.__class__.__name__.lower()
+    return 'forum' in cls_name
+
+
+def _build_forum_post_title(post_title: Optional[str], fallback_text: str = '') -> str:
+    """构建论坛帖子标题，确保不为空且不超过 Discord 限制。"""
+    title = (post_title or '').strip() or (fallback_text or '').strip() or '自动发送帖子'
+    title = re.sub(r'\s+', ' ', title)
+    return title[:100]
+
+
+def resolve_post_title(content_title: str) -> str:
+    """解析当前任务实际使用的帖子标题。"""
+    configured_title = str(task_status.get('post_title') or '').strip()
+    return configured_title or (content_title or '').strip() or '自动发送帖子'
+
+
+def resolve_content_post_title(content: Dict, default_title: str = '') -> str:
+    """解析单条内容对应的论坛帖子标题。"""
+    if not isinstance(content, dict):
+        return (default_title or '').strip() or '自动发送帖子'
+
+    forum_post_title = str(content.get('forum_post_title') or '').strip()
+    if forum_post_title:
+        return forum_post_title
+
+    content_title = str(content.get('title') or default_title or '').strip()
+    return content_title or '自动发送帖子'
+
+
+def resolve_content_send_mode(content: Dict) -> str:
+    """解析单条内容对应的发送方式。"""
+    if not isinstance(content, dict):
+        return 'direct'
+
+    send_mode = str(content.get('send_mode') or '').strip().lower()
+    return send_mode if send_mode in {'direct', 'post'} else 'direct'
+
+
+def resolve_content_forum_tags(content: Dict) -> List[str]:
+    """解析单条内容对应的论坛标签配置。"""
+    if not isinstance(content, dict):
+        return []
+
+    raw_forum_tags = content.get('forum_tags')
+    if raw_forum_tags is None:
+        return []
+
+    if isinstance(raw_forum_tags, str):
+        forum_tags_text = raw_forum_tags.strip()
+        if not forum_tags_text:
+            return []
+        try:
+            parsed_tags = json.loads(forum_tags_text)
+            raw_forum_tags = parsed_tags if isinstance(parsed_tags, list) else [parsed_tags]
+        except Exception:
+            raw_forum_tags = re.split(r'[\n,]+', forum_tags_text)
+    elif not isinstance(raw_forum_tags, (list, tuple, set)):
+        raw_forum_tags = [raw_forum_tags]
+
+    normalized_tags: List[str] = []
+    seen = set()
+    for tag in raw_forum_tags:
+        clean_tag = str(tag or '').strip()
+        if not clean_tag:
+            continue
+        dedupe_key = clean_tag.casefold()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        normalized_tags.append(clean_tag)
+
+    return normalized_tags
+
+
+def _forum_requires_tag(target) -> bool:
+    """判断论坛频道是否要求至少选择一个标签。"""
+    return bool(getattr(getattr(target, 'flags', None), 'require_tag', False))
+
+
+def _resolve_forum_applied_tags(target, forum_tags: List[str], label: str):
+    """根据名称或ID解析要应用到论坛帖子的标签对象。"""
+    requested_tags = resolve_content_forum_tags({'forum_tags': forum_tags})
+    available_tags = list(getattr(target, 'available_tags', []) or [])
+
+    if not requested_tags:
+        if _forum_requires_tag(target):
+            logger.error(f"{label} 当前论坛频道要求至少选择一个标签，请先在内容管理中填写帖子标签")
+            return None
+        return []
+
+    if not available_tags:
+        logger.error(f"{label} 当前论坛频道没有可用标签，无法应用已配置标签")
+        return None
+
+    tags_by_id = {}
+    tags_by_name = {}
+    for tag in available_tags:
+        tag_id = getattr(tag, 'id', None)
+        if tag_id is not None:
+            tags_by_id[str(tag_id)] = tag
+
+        tag_name = str(getattr(tag, 'name', '') or '').strip()
+        if tag_name:
+            tags_by_name[tag_name.casefold()] = tag
+
+    resolved_tags = []
+    seen_ids = set()
+    missing_tags = []
+
+    for requested_tag in requested_tags:
+        resolved_tag = tags_by_id.get(requested_tag) or tags_by_name.get(requested_tag.casefold())
+        if resolved_tag is None:
+            missing_tags.append(requested_tag)
+            continue
+
+        resolved_id = getattr(resolved_tag, 'id', None)
+        if resolved_id in seen_ids:
+            continue
+        seen_ids.add(resolved_id)
+        resolved_tags.append(resolved_tag)
+
+    if missing_tags:
+        logger.error(f"{label} 指定的帖子标签不存在: {', '.join(missing_tags)}")
+        return None
+
+    return resolved_tags
+
+
+def _extract_thread_from_create_result(result):
+    """从 create_thread 的返回值中提取 thread 对象。"""
+    if result is None:
+        return None
+
+    if isinstance(result, (tuple, list)) and result:
+        candidate = result[0]
+        if callable(getattr(candidate, 'send', None)):
+            return candidate
+
+    thread = getattr(result, 'thread', None)
+    if thread and callable(getattr(thread, 'send', None)):
+        return thread
+
+    if callable(getattr(result, 'send', None)):
+        return result
+
+    return None
+
+
+async def _send_direct_payload(target, content: Optional[str], files: Optional[list], text_timeout: int, image_timeout: int, label: str) -> bool:
+    if content and files:
+        return await _send_with_timeout(
+            target.send(content=content, files=files),
+            max(text_timeout, image_timeout),
+            label
+        )
+
+    if content:
+        return await _send_with_timeout(target.send(content), text_timeout, label)
+
+    if files:
+        return await _send_with_timeout(target.send(files=files), image_timeout, label)
+
+    return False
+
+
+async def send_content_to_target(
+    target,
+    send_mode: str,
+    post_title: str,
+    text_content: str,
+    forum_tags: Optional[List[str]],
+    files: Optional[list],
+    text_timeout: int,
+    image_timeout: int,
+    label: str
+) -> bool:
+    """向目标发送内容；按内容配置决定新建帖子或直接发送。"""
+    direct_text = (text_content or '').strip() or None
+    forum_text = direct_text or _build_forum_post_title(post_title)
+    files = files or []
+    normalized_send_mode = send_mode if send_mode in {'direct', 'post'} else 'direct'
+
+    if normalized_send_mode == 'post':
+        if not _is_forum_channel(target):
+            logger.error(f"{label} 当前内容设置为新建帖子，请填写论坛频道 ID")
+            return False
+
+        create_thread = getattr(target, 'create_thread', None)
+        if not callable(create_thread):
+            logger.error(f"{label} 不是可创建帖子的论坛频道")
+            return False
+
+        thread_name = _build_forum_post_title(post_title, forum_text)
+        applied_tags = _resolve_forum_applied_tags(target, forum_tags or [], label)
+        if applied_tags is None:
+            return False
+        try:
+            create_kwargs = {
+                'name': thread_name,
+            }
+            if forum_text:
+                create_kwargs['content'] = forum_text
+            if applied_tags:
+                create_kwargs['applied_tags'] = applied_tags
+            if files:
+                create_kwargs['files'] = files
+
+            await create_thread(**create_kwargs)
+            return True
+        except TypeError:
+            try:
+                fallback_kwargs = {
+                    'name': thread_name
+                }
+                if applied_tags:
+                    fallback_kwargs['applied_tags'] = applied_tags
+                created = await create_thread(**fallback_kwargs)
+            except Exception as exc:
+                logger.error(f"{label} 新建帖子失败: {exc}")
+                return False
+
+            thread = _extract_thread_from_create_result(created)
+            if not thread:
+                logger.error(f"{label} 新建帖子成功但未拿到线程对象")
+                return False
+
+            return await _send_direct_payload(
+                thread,
+                forum_text,
+                files if files else None,
+                text_timeout,
+                image_timeout,
+                f"{label} 帖子首条消息"
+            )
+        except Exception as exc:
+            logger.error(f"{label} 新建帖子失败: {exc}")
+            return False
+
+    if _is_forum_channel(target):
+        logger.error(f"{label} 当前内容设置为直接发送，请填写普通频道或已存在帖子链接/ID")
+        return False
+
+    return await _send_direct_payload(
+        target,
+        direct_text,
+        files if files else None,
+        text_timeout,
+        image_timeout,
+        label
+    )
 
 
 async def _send_with_timeout(coro, timeout: int, label: str) -> bool:
@@ -70,6 +396,7 @@ def reset_task_status():
         'content_ids': [],
         'account_ids': [],
         'channel_ids': [],
+        'post_title': None,
         'rotation_mode': True,
         'repeat_mode': True,
         'interval': None,
@@ -94,6 +421,7 @@ def _persist_task_state(db) -> None:
             'shop_id': json.dumps(task_status.get('content_ids', [])),  # 复用 shop_id 字段存储 content_ids
             'channel_id': str(task_status.get('rotation_mode', True)),  # 复用 channel_id 字段存储 rotation_mode
             'channel_ids': task_status.get('channel_ids', []),
+            'post_title': task_status.get('post_title'),
             'repeat_mode': bool(task_status.get('repeat_mode', True)),
             'account_ids': task_status.get('account_ids', []),
             'interval': task_status.get('interval'),
@@ -158,6 +486,7 @@ def load_task_state(db) -> None:
     task_status['rotation_mode'] = rotation_mode
     task_status['account_ids'] = state.get('account_ids', [])
     task_status['channel_ids'] = channel_ids
+    task_status['post_title'] = state.get('post_title')
     task_status['interval'] = state.get('interval')
     task_status['total_contents'] = state.get('total_products', 0)
     task_status['sent_count'] = state.get('sent_count', 0)
@@ -181,6 +510,7 @@ async def auto_send_loop(
     content_ids: List[int],
     selected_account_ids: List[int],
     channel_ids: List[str],
+    post_title: Optional[str],
     rotation_mode: bool,
     repeat_mode: bool,
     interval: int,
@@ -207,6 +537,7 @@ async def auto_send_loop(
     task_status['is_paused'] = False
     task_status['content_ids'] = content_ids
     task_status['account_ids'] = selected_account_ids
+    task_status['post_title'] = (post_title or '').strip() or None
     task_status['rotation_mode'] = rotation_mode
     task_status['repeat_mode'] = repeat_mode
     task_status['interval'] = interval
@@ -218,7 +549,8 @@ async def auto_send_loop(
 
     logger.info(
         f"启动自动发送: 内容数={len(content_ids)}，账号数={len(selected_account_ids)}，"
-        f"轮换模式={rotation_mode}，循环发送={repeat_mode}，间隔{interval}s"
+        f"轮换模式={rotation_mode}，循环发送={repeat_mode}，间隔{interval}s，"
+        f"任务帖子标题={task_status['post_title'] or '未设置'}"
     )
 
     try:
@@ -298,6 +630,10 @@ async def auto_send_loop(
             title = content.get('title', '未知内容')
             text_content = content.get('text_content', '')
             image_paths = content.get('image_paths', [])
+            send_mode = resolve_content_send_mode(content)
+            default_post_title = task_status['post_title'] or title
+            forum_post_title = resolve_content_post_title(content, default_title=default_post_title)
+            forum_tags = resolve_content_forum_tags(content)
 
             # 获取当前轮换的账号
             if rotation_mode:
@@ -319,58 +655,56 @@ async def auto_send_loop(
             text_timeout = int(getattr(config, 'AUTO_SENDER_TEXT_TIMEOUT', 30))
             image_timeout = int(getattr(config, 'AUTO_SENDER_IMAGE_TIMEOUT', 60))
             for channel_id in channel_ids:
-                channel_label = str(channel_id).strip()
-                if not channel_label:
+                target_label = str(channel_id).strip()
+                if not target_label:
                     continue
-                try:
-                    channel_id_int = int(channel_label)
-                except (TypeError, ValueError):
+                target_id = parse_send_target_id(target_label)
+                if target_id is None:
                     failed_channels += 1
-                    logger.error(f"无效频道ID: {channel_label}")
+                    logger.error(f"无效发送目标: {target_label}")
                     continue
 
-                channel = current_bot.get_channel(channel_id_int)
-                if not channel:
+                target = await resolve_send_target(current_bot, target_label)
+                if not target:
                     failed_channels += 1
                     logger.error(
                         f"账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
-                        f"找不到频道 {channel_id_int}"
+                        f"找不到频道/帖子 {target_label}"
                     )
                     continue
 
-                channel_failed = False
-                channel_success = False
-                sent_text = False
-                sent_images = False
-                if text_content:
-                    label = (
+                can_send_direct = callable(getattr(target, 'send', None))
+                can_create_thread = _is_forum_channel(target) and callable(getattr(target, 'create_thread', None))
+                if not can_send_direct and not can_create_thread:
+                    failed_channels += 1
+                    logger.error(
                         f"账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
-                        f"频道 {channel_id_int} 文本"
+                        f"目标 {target_label} 不支持发送，请填写频道ID或论坛频道ID"
                     )
-                    if await _send_with_timeout(channel.send(text_content), text_timeout, label):
-                        channel_success = True
-                        sent_text = True
-                    else:
-                        channel_failed = True
+                    continue
 
-                if not channel_failed and image_paths:
-                    import discord
-                    content_images_dir = os.path.join(config.DATA_DIR, 'content_images')
-                    files = []
-                    for img_filename in image_paths:
-                        img_path = os.path.join(content_images_dir, img_filename)
-                        if os.path.exists(img_path):
-                            files.append(discord.File(img_path))
-                    if files:
-                        label = (
-                            f"账号 {current_bot.user.name if current_bot.user else 'Unknown'} "
-                            f"频道 {channel_id_int} 图片"
-                        )
-                        if await _send_with_timeout(channel.send(files=files), image_timeout, label):
-                            channel_success = True
-                            sent_images = True
-                        else:
-                            channel_failed = True
+                target_name = getattr(target, 'name', None) or str(target_id)
+                import discord
+                content_images_dir = os.path.join(config.DATA_DIR, 'content_images')
+                files = []
+                for img_filename in image_paths:
+                    img_path = os.path.join(content_images_dir, img_filename)
+                    if os.path.exists(img_path):
+                        files.append(discord.File(img_path))
+
+                channel_label = f"账号 {current_bot.user.name if current_bot.user else 'Unknown'} 目标 {target_name}"
+                channel_success = await send_content_to_target(
+                    target=target,
+                    send_mode=send_mode,
+                    post_title=forum_post_title,
+                    text_content=text_content,
+                    forum_tags=forum_tags,
+                    files=files,
+                    text_timeout=text_timeout,
+                    image_timeout=image_timeout,
+                    label=channel_label
+                )
+                channel_failed = not channel_success
 
                 if channel_failed:
                     failed_channels += 1
@@ -440,6 +774,7 @@ def start_sending_task(
     content_ids: List[int],
     account_ids: List[int],
     channel_ids: List[str],
+    post_title: Optional[str],
     rotation_mode: bool,
     repeat_mode: bool,
     interval: int,
@@ -486,6 +821,7 @@ def start_sending_task(
     task_status['content_ids'] = content_ids
     task_status['account_ids'] = account_ids
     task_status['channel_ids'] = channel_ids
+    task_status['post_title'] = (post_title or '').strip() or None
     task_status['rotation_mode'] = rotation_mode
     task_status['repeat_mode'] = repeat_mode
     task_status['interval'] = interval
@@ -501,6 +837,7 @@ def start_sending_task(
                 content_ids=content_ids,
                 selected_account_ids=account_ids,
                 channel_ids=channel_ids,
+                post_title=task_status['post_title'],
                 rotation_mode=rotation_mode,
                 repeat_mode=repeat_mode,
                 interval=interval,
@@ -580,6 +917,7 @@ def resume_sending_task(db, bot_clients: List, bot_loop: asyncio.AbstractEventLo
         content_ids=content_ids,
         account_ids=account_ids,
         channel_ids=channel_ids,
+        post_title=state.get('post_title'),
         rotation_mode=rotation_mode,
         repeat_mode=repeat_mode,
         interval=int(state.get('interval') or 60),

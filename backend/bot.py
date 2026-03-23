@@ -185,12 +185,8 @@ class HTTPLogHandler(logging.Handler):
                 if not self.is_sending:
                     # 在机器人的事件循环中创建任务
                     try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            loop.create_task(self.send_pending_logs())
-                        else:
-                            # 如果循环没有运行，直接发送（同步方式）
-                            self.send_sync(log_data)
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self.send_pending_logs())
                     except RuntimeError:
                         # 没有事件循环，直接同步发送
                         self.send_sync(log_data)
@@ -202,9 +198,7 @@ class HTTPLogHandler(logging.Handler):
         """同步发送日志（作为fallback）"""
         try:
             import requests
-            # 【修复】强制使用 127.0.0.1，因为这是进程间通信，不应走公网
-            local_api_url = 'http://127.0.0.1:5001/api'
-            response = requests.post(f'{local_api_url}/logs/add',
+            response = requests.post(f'{config.BACKEND_API_URL}/logs/add',
                                    json=log_data, timeout=2, proxies={'http': None, 'https': None, 'all': None})
             if response.status_code != 200:
                 print(f"同步发送日志失败: {response.status_code}")
@@ -219,16 +213,13 @@ class HTTPLogHandler(logging.Handler):
 
         self.is_sending = True
 
-        # 【修复】强制使用 127.0.0.1
-        local_api_url = 'http://127.0.0.1:5001/api'
-
         try:
             while self.pending_logs:
                 log_data = self.pending_logs.pop(0)
 
                 try:
                     async with aiohttp.ClientSession(trust_env=False) as session:
-                        async with session.post(f'{local_api_url}/logs/add',
+                        async with session.post(f'{config.BACKEND_API_URL}/logs/add',
                                               json=log_data, timeout=aiohttp.ClientTimeout(total=2)) as resp:
                             if resp.status != 200:
                                 print(f"发送日志失败: {resp.status}")
@@ -321,6 +312,14 @@ class DiscordBotClient(discord.Client):
                 return
 
             attempt += 1
+            if self.is_closed():
+                try:
+                    self.clear()
+                    logger.info(f'账号 {self.account_id} 已重置客户端状态，准备重新登录')
+                except Exception as e:
+                    logger.error(f'账号 {self.account_id} 重置客户端状态失败: {e}')
+                    self.running = False
+                    return
             self._reset_login_ready_event()
             attempt_started = time.monotonic()
             logger.info(

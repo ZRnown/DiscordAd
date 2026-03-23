@@ -12,6 +12,31 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_forum_tags(forum_tags: Any) -> List[str]:
+    """规范化论坛标签列表。"""
+    if forum_tags is None:
+        return []
+
+    if isinstance(forum_tags, str):
+        forum_tags = [forum_tags]
+    elif not isinstance(forum_tags, (list, tuple, set)):
+        forum_tags = [forum_tags]
+
+    normalized_tags: List[str] = []
+    seen = set()
+    for tag in forum_tags:
+        clean_tag = str(tag or '').strip()
+        if not clean_tag:
+            continue
+        dedupe_key = clean_tag.casefold()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        normalized_tags.append(clean_tag)
+
+    return normalized_tags
+
 class Database:
     def __init__(self):
         # SQLite 数据库路径 (用于存储商品元数据和Discord账号信息)
@@ -215,12 +240,30 @@ class Database:
                 CREATE TABLE IF NOT EXISTS contents (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     title TEXT NOT NULL,
+                    send_mode TEXT DEFAULT 'direct',
+                    forum_post_title TEXT,
+                    forum_tags TEXT DEFAULT '[]',
                     text_content TEXT,
                     image_paths TEXT DEFAULT '[]',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            try:
+                cursor.execute("ALTER TABLE contents ADD COLUMN send_mode TEXT DEFAULT 'direct'")
+            except sqlite3.OperationalError:
+                pass  # 字段已存在
+
+            try:
+                cursor.execute('ALTER TABLE contents ADD COLUMN forum_post_title TEXT')
+            except sqlite3.OperationalError:
+                pass  # 字段已存在
+
+            try:
+                cursor.execute("ALTER TABLE contents ADD COLUMN forum_tags TEXT DEFAULT '[]'")
+            except sqlite3.OperationalError:
+                pass  # 字段已存在
 
             # 插入默认管理员用户
             try:
@@ -314,6 +357,7 @@ class Database:
                     shop_id INTEGER,
                     channel_id TEXT,
                     channel_ids TEXT,
+                    post_title TEXT,
                     repeat_mode INTEGER DEFAULT 0,
                     account_ids TEXT,
                     interval INTEGER DEFAULT 60,
@@ -343,6 +387,12 @@ class Database:
             # 为sender_task_state表添加channel_ids字段
             try:
                 cursor.execute('ALTER TABLE sender_task_state ADD COLUMN channel_ids TEXT')
+            except sqlite3.OperationalError:
+                pass  # 字段已存在
+
+            # 为sender_task_state表添加post_title字段
+            try:
+                cursor.execute('ALTER TABLE sender_task_state ADD COLUMN post_title TEXT')
             except sqlite3.OperationalError:
                 pass  # 字段已存在
 
@@ -2652,6 +2702,7 @@ class Database:
                         shop_id,
                         channel_id,
                         channel_ids,
+                        post_title,
                         repeat_mode,
                         account_ids,
                         interval,
@@ -2680,6 +2731,7 @@ class Database:
                     data['channel_ids'] = json.loads(channel_ids)
                 except Exception:
                     data['channel_ids'] = []
+                data['post_title'] = data.get('post_title')
                 return data
         except Exception as e:
             logger.error(f"获取任务状态失败: {e}")
@@ -2702,6 +2754,7 @@ class Database:
                         shop_id = ?,
                         channel_id = ?,
                         channel_ids = ?,
+                        post_title = ?,
                         repeat_mode = ?,
                         account_ids = ?,
                         interval = ?,
@@ -2721,6 +2774,7 @@ class Database:
                     state.get('shop_id'),
                     state.get('channel_id'),
                     channel_ids_json,
+                    state.get('post_title'),
                     1 if state.get('repeat_mode') else 0,
                     account_ids_json,
                     state.get('interval'),
@@ -2752,6 +2806,7 @@ class Database:
                         shop_id = NULL,
                         channel_id = NULL,
                         channel_ids = NULL,
+                        post_title = NULL,
                         repeat_mode = 0,
                         account_ids = NULL,
                         interval = 60,
@@ -3132,6 +3187,14 @@ def get_all_contents() -> List[Dict]:
                     content['image_paths'] = json.loads(content.get('image_paths') or '[]')
                 except:
                     content['image_paths'] = []
+                try:
+                    content['forum_tags'] = _normalize_forum_tags(
+                        json.loads(content.get('forum_tags') or '[]')
+                    )
+                except:
+                    content['forum_tags'] = []
+                content['send_mode'] = content.get('send_mode') or 'direct'
+                content['forum_post_title'] = (content.get('forum_post_title') or '').strip()
                 contents.append(content)
             return contents
     except Exception as e:
@@ -3139,16 +3202,33 @@ def get_all_contents() -> List[Dict]:
         return []
 
 
-def add_content(title: str, text_content: str = '', image_paths: List[str] = None) -> Optional[int]:
+def add_content(
+    title: str,
+    text_content: str = '',
+    image_paths: List[str] = None,
+    forum_post_title: Optional[str] = None,
+    send_mode: Optional[str] = None,
+    forum_tags: Optional[List[str]] = None
+) -> Optional[int]:
     """添加新内容"""
     try:
         with db.get_connection() as conn:
             cursor = conn.cursor()
             image_paths_json = json.dumps(image_paths or [])
+            clean_forum_post_title = (forum_post_title or '').strip() or None
+            clean_send_mode = send_mode if send_mode in {'direct', 'post'} else 'direct'
+            clean_forum_tags_json = json.dumps(_normalize_forum_tags(forum_tags))
             cursor.execute('''
-                INSERT INTO contents (title, text_content, image_paths)
-                VALUES (?, ?, ?)
-            ''', (title, text_content or '', image_paths_json))
+                INSERT INTO contents (title, send_mode, forum_post_title, forum_tags, text_content, image_paths)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                title,
+                clean_send_mode,
+                clean_forum_post_title,
+                clean_forum_tags_json,
+                text_content or '',
+                image_paths_json
+            ))
             conn.commit()
             return cursor.lastrowid
     except Exception as e:
@@ -3169,6 +3249,14 @@ def get_content_by_id(content_id: int) -> Optional[Dict]:
                     content['image_paths'] = json.loads(content.get('image_paths') or '[]')
                 except:
                     content['image_paths'] = []
+                try:
+                    content['forum_tags'] = _normalize_forum_tags(
+                        json.loads(content.get('forum_tags') or '[]')
+                    )
+                except:
+                    content['forum_tags'] = []
+                content['send_mode'] = content.get('send_mode') or 'direct'
+                content['forum_post_title'] = (content.get('forum_post_title') or '').strip()
                 return content
             return None
     except Exception as e:
@@ -3176,7 +3264,15 @@ def get_content_by_id(content_id: int) -> Optional[Dict]:
         return None
 
 
-def update_content(content_id: int, title: str = None, text_content: str = None, image_paths: List[str] = None) -> bool:
+def update_content(
+    content_id: int,
+    title: str = None,
+    forum_post_title: str = None,
+    send_mode: str = None,
+    forum_tags: List[str] = None,
+    text_content: str = None,
+    image_paths: List[str] = None
+) -> bool:
     """更新内容"""
     try:
         with db.get_connection() as conn:
@@ -3186,6 +3282,15 @@ def update_content(content_id: int, title: str = None, text_content: str = None,
             if title is not None:
                 updates.append('title = ?')
                 params.append(title)
+            if send_mode is not None:
+                updates.append('send_mode = ?')
+                params.append(send_mode if send_mode in {'direct', 'post'} else 'direct')
+            if forum_post_title is not None:
+                updates.append('forum_post_title = ?')
+                params.append((forum_post_title or '').strip() or None)
+            if forum_tags is not None:
+                updates.append('forum_tags = ?')
+                params.append(json.dumps(_normalize_forum_tags(forum_tags)))
             if text_content is not None:
                 updates.append('text_content = ?')
                 params.append(text_content)
@@ -3257,9 +3362,24 @@ def update_account_channels(account_id: int, channel_ids: List[str]) -> bool:
 
 # 为 Database 类添加内容管理方法别名
 Database.get_all_contents = lambda self: get_all_contents()
-Database.add_content = lambda self, title, text_content='', image_paths=None: add_content(title, text_content, image_paths)
+Database.add_content = lambda self, title, text_content='', image_paths=None, forum_post_title=None, send_mode=None, forum_tags=None: add_content(
+    title=title,
+    text_content=text_content,
+    image_paths=image_paths,
+    forum_post_title=forum_post_title,
+    send_mode=send_mode,
+    forum_tags=forum_tags
+)
 Database.get_content_by_id = lambda self, content_id: get_content_by_id(content_id)
-Database.update_content = lambda self, content_id, title=None, text_content=None, image_paths=None: update_content(content_id, title, text_content, image_paths)
+Database.update_content = lambda self, content_id, title=None, forum_post_title=None, send_mode=None, forum_tags=None, text_content=None, image_paths=None: update_content(
+    content_id=content_id,
+    title=title,
+    forum_post_title=forum_post_title,
+    send_mode=send_mode,
+    forum_tags=forum_tags,
+    text_content=text_content,
+    image_paths=image_paths
+)
 Database.delete_content = lambda self, content_id: delete_content(content_id)
 Database.get_account_channels = lambda self, account_id: get_account_channels(account_id)
 Database.update_account_channels = lambda self, account_id, channel_ids: update_account_channels(account_id, channel_ids)

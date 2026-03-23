@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import uuid
 from typing import Any, Dict, Optional, Tuple
 
@@ -11,16 +12,65 @@ import requests
 from config import config
 
 LICENSE_FILE = os.path.join(config.DATA_DIR, 'license.json')
+DEVICE_ID_FILE = os.path.join(config.DATA_DIR, 'device_id.txt')
+
+
+def _normalize_hwid(value: Optional[str]) -> str:
+    text = str(value or '').strip().upper()
+    if re.fullmatch(r'[0-9A-F]{32}', text):
+        return text
+    return ''
+
+
+def _load_cached_hwid() -> str:
+    try:
+        with open(DEVICE_ID_FILE, 'r', encoding='utf-8') as f:
+            return _normalize_hwid(f.read())
+    except FileNotFoundError:
+        return ''
+    except Exception:
+        return ''
+
+
+def _save_cached_hwid(hwid: str) -> bool:
+    normalized = _normalize_hwid(hwid)
+    if not normalized:
+        return False
+
+    try:
+        os.makedirs(os.path.dirname(DEVICE_ID_FILE), exist_ok=True)
+        with open(DEVICE_ID_FILE, 'w', encoding='utf-8') as f:
+            f.write(normalized)
+        return True
+    except Exception:
+        return False
+
+
+def _build_runtime_hwid() -> str:
+    """基于当前系统信息生成硬件标识，仅在首次创建缓存时使用。"""
+    mac = ':'.join(
+        ['{:02x}'.format((uuid.getnode() >> i) & 0xff) for i in range(0, 48, 8)]
+    )[0:17]
+    system_info = f"{platform.machine()}-{platform.system()}-{platform.node()}-{mac}"
+    return hashlib.sha256(system_info.encode()).hexdigest()[:32].upper()
 
 
 def generate_hwid() -> str:
     """生成稳定的硬件标识，用于许可证绑定。"""
     try:
-        mac = ':'.join(
-            ['{:02x}'.format((uuid.getnode() >> i) & 0xff) for i in range(0, 48, 8)]
-        )[0:17]
-        system_info = f"{platform.machine()}-{platform.system()}-{platform.node()}-{mac}"
-        return hashlib.sha256(system_info.encode()).hexdigest()[:32].upper()
+        cached_hwid = _load_cached_hwid()
+        if cached_hwid:
+            return cached_hwid
+
+        saved_license = load_license() or {}
+        saved_hwid = _normalize_hwid(saved_license.get('hwid'))
+        if saved_hwid:
+            _save_cached_hwid(saved_hwid)
+            return saved_hwid
+
+        generated_hwid = _build_runtime_hwid()
+        _save_cached_hwid(generated_hwid)
+        return generated_hwid
     except Exception:
         return uuid.uuid4().hex[:32].upper()
 

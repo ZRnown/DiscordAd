@@ -27,7 +27,7 @@
       "http": {
         "all": true,
         "request": true,
-        "scope": ["http://localhost:5001", "http://127.0.0.1:5001"]
+        "scope": ["http://localhost:5013", "http://127.0.0.1:5013"]
       },
       "window": {
         "all": true

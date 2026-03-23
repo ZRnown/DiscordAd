@@ -7,8 +7,7 @@ import AccountsPage from './pages/AccountsPage'
 import ContentsPage from './pages/ContentsPage'
 import AutoSenderPage from './pages/AutoSenderPage'
 import LicenseGate from './components/LicenseGate'
-
-const API_BASE = 'http://127.0.0.1:5001/api'
+import { API_BASE } from './lib/api'
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {

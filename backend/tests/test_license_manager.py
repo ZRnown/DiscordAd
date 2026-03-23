@@ -1,0 +1,55 @@
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+import license_manager
+
+
+class LicenseManagerDeviceIdTests(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.license_file = Path(self.tmpdir.name) / 'license.json'
+        self.device_id_file = Path(self.tmpdir.name) / 'device_id.txt'
+        self.original_license_file = license_manager.LICENSE_FILE
+        self.had_device_id_attr = hasattr(license_manager, 'DEVICE_ID_FILE')
+        self.original_device_id_file = getattr(license_manager, 'DEVICE_ID_FILE', None)
+        license_manager.LICENSE_FILE = str(self.license_file)
+        license_manager.DEVICE_ID_FILE = str(self.device_id_file)
+
+    def tearDown(self):
+        license_manager.LICENSE_FILE = self.original_license_file
+        if self.had_device_id_attr:
+            license_manager.DEVICE_ID_FILE = self.original_device_id_file
+        else:
+            delattr(license_manager, 'DEVICE_ID_FILE')
+        self.tmpdir.cleanup()
+
+    def test_generate_hwid_prefers_cached_device_id(self):
+        cached_hwid = 'ABCDEF0123456789ABCDEF0123456789'
+        self.device_id_file.write_text(cached_hwid, encoding='utf-8')
+
+        self.assertEqual(license_manager.generate_hwid(), cached_hwid)
+
+    def test_generate_hwid_migrates_saved_license_hwid_into_device_cache(self):
+        saved_hwid = '1234567890ABCDEF1234567890ABCDEF'
+        self.license_file.write_text(
+            json.dumps({
+                'license_key': 'SAMPLE-KEY',
+                'hwid': saved_hwid,
+                'days': -1,
+                'activated_at': '2026-03-22T00:00:00'
+            }),
+            encoding='utf-8'
+        )
+
+        self.assertEqual(license_manager.generate_hwid(), saved_hwid)
+        self.assertTrue(self.device_id_file.exists())
+        self.assertEqual(self.device_id_file.read_text(encoding='utf-8').strip(), saved_hwid)
+

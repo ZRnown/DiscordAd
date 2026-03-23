@@ -5,7 +5,7 @@ flask>=2.3.0
 flask-cors>=4.0.0
 
 # Discord (使用 self-bot 版本)
-discord.py-self>=1.9.2
+discord.py-self==2.1.0
 
 # HTTP 请求
 requests>=2.31.0

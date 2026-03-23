@@ -14,12 +14,14 @@ import requests
 import sqlite3
 import os
 import json
+import sys
 from datetime import datetime
 from collections import deque
 from typing import Dict, List, Optional
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
+import discord
 
 from config import config
 from database import Database
@@ -57,6 +59,16 @@ bot_thread: threading.Thread = None
 log_buffer = deque(maxlen=1000)
 log_seq = 0
 log_lock = threading.Lock()
+
+
+def get_runtime_snapshot() -> Dict[str, str]:
+    return {
+        'python_executable': sys.executable,
+        'python_version': sys.version.split()[0],
+        'discord_module': getattr(discord, '__file__', ''),
+        'discord_version': getattr(discord, '__version__', 'unknown'),
+        'backend_port': str(config.FLASK_PORT)
+    }
 
 
 def _append_log(log_data: Dict) -> Dict:
@@ -242,25 +254,51 @@ def _start_account_by_id(account_id: int) -> Dict:
     if not account:
         return {'success': False, 'error': '账号不存在'}
 
+    if not bot_loop or not bot_loop.is_running():
+        return {'success': False, 'error': 'Bot 事件循环未就绪，请重启后端后重试'}
+
     for client in list(bot_clients):
         if client.account_id == account_id:
-            if not client.is_closed():
+            if not client.is_closed() and client.is_ready():
                 return {'success': False, 'error': '账号已在线'}
+            if not client.is_closed():
+                return {'success': False, 'error': '账号启动中'}
             bot_clients.remove(client)
-
-    client = DiscordBotClient(account_id=account_id)
     token = account['token']
-    client.stop_requested = False
 
-    async def start_bot():
+    async def create_and_start_bot():
+        client = DiscordBotClient(account_id=account_id)
+        client.stop_requested = False
+        bot_clients.append(client)
+
+        async def start_bot():
+            try:
+                await client.start_with_retries(token)
+            except Exception as e:
+                try:
+                    db.update_account_status(account_id, 'offline')
+                except Exception:
+                    pass
+                logger.error(f"账号 {account_id} 启动失败: {e}")
+            finally:
+                if client in bot_clients and (client.stop_requested or client.is_closed() or not client.is_ready()):
+                    try:
+                        bot_clients.remove(client)
+                    except ValueError:
+                        pass
+
         try:
-            await client.start_with_retries(token)
-        except Exception as e:
-            logger.error(f"账号 {account_id} 启动失败: {e}")
+            asyncio.create_task(start_bot())
+        except Exception:
+            if client in bot_clients:
+                bot_clients.remove(client)
+            raise
 
-    asyncio.run_coroutine_threadsafe(start_bot(), bot_loop)
-    bot_clients.append(client)
-    db.update_account_status(account_id, 'online')
+        return client
+
+    future = asyncio.run_coroutine_threadsafe(create_and_start_bot(), bot_loop)
+    future.result(timeout=5)
+    db.update_account_status(account_id, 'connecting')
     return {'success': True, 'message': '账号启动中...'}
 
 # ============== 账号管理 API ==============
@@ -270,10 +308,20 @@ def get_accounts():
     """获取所有 Discord 账号"""
     try:
         accounts = db.get_all_accounts()
-        # 添加在线状态
         online_ids = {c.account_id for c in bot_clients if c.is_ready() and not c.is_closed()}
+        connecting_ids = {
+            c.account_id for c in bot_clients
+            if not c.is_ready() and not c.is_closed()
+        }
         for acc in accounts:
-            acc['is_online'] = acc['id'] in online_ids
+            runtime_status = 'offline'
+            if acc['id'] in online_ids:
+                runtime_status = 'online'
+            elif acc['id'] in connecting_ids:
+                runtime_status = 'connecting'
+
+            acc['is_online'] = runtime_status == 'online'
+            acc['status'] = runtime_status
         return jsonify({'success': True, 'accounts': accounts})
     except Exception as e:
         logger.error(f"获取账号列表失败: {e}")
@@ -355,7 +403,7 @@ def start_all_accounts():
                 started += 1
             else:
                 error = result.get('error', '')
-                if error == '账号已在线':
+                if error in {'账号已在线', '账号启动中'}:
                     skipped += 1
                 else:
                     failed.append({'id': account['id'], 'error': error or '启动失败'})
@@ -403,6 +451,7 @@ def start_sender():
         content_ids = data.get('contentIds', [])
         account_ids = data.get('accountIds', [])
         channel_ids = data.get('channelIds', [])
+        post_title = data.get('postTitle', '')
         rotation_mode = data.get('rotationMode', True)  # 默认轮换模式
         repeat_mode = data.get('repeatMode', True)  # 默认循环发送
         interval = data.get('interval', config.DEFAULT_SEND_INTERVAL)
@@ -413,7 +462,7 @@ def start_sender():
         if not account_ids:
             return jsonify({'success': False, 'error': '请选择至少一个账号'}), 400
         if not channel_ids:
-            return jsonify({'success': False, 'error': '请输入至少一个频道ID'}), 400
+            return jsonify({'success': False, 'error': '请输入至少一个频道或帖子目标'}), 400
 
         # 非轮换模式只能选择一个账号
         if not rotation_mode and len(account_ids) > 1:
@@ -426,6 +475,7 @@ def start_sender():
             content_ids=[int(id) for id in content_ids],
             account_ids=[int(id) for id in account_ids],
             channel_ids=[str(c).strip() for c in channel_ids if str(c).strip()],
+            post_title=str(post_title).strip(),
             rotation_mode=rotation_mode,
             repeat_mode=bool(repeat_mode),
             interval=int(interval),
@@ -503,7 +553,8 @@ def health_check():
         'success': True,
         'status': 'running',
         'bot_count': len(bot_clients),
-        'online_bots': len([c for c in bot_clients if c.is_ready()])
+        'online_bots': len([c for c in bot_clients if c.is_ready()]),
+        **get_runtime_snapshot()
     })
 
 
@@ -526,6 +577,38 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+def normalize_request_forum_tags(raw_tags) -> List[str]:
+    """规范化请求中的论坛标签。"""
+    if raw_tags is None:
+        return []
+
+    if isinstance(raw_tags, str):
+        text = raw_tags.strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+            raw_tags = parsed if isinstance(parsed, list) else [parsed]
+        except Exception:
+            raw_tags = re.split(r'[\n,]+', text)
+    elif not isinstance(raw_tags, list):
+        raw_tags = [raw_tags]
+
+    normalized_tags: List[str] = []
+    seen = set()
+    for tag in raw_tags:
+        clean_tag = str(tag or '').strip()
+        if not clean_tag:
+            continue
+        dedupe_key = clean_tag.casefold()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        normalized_tags.append(clean_tag)
+
+    return normalized_tags
+
+
 @app.route('/api/contents', methods=['GET'])
 def get_contents():
     """获取所有内容"""
@@ -542,14 +625,24 @@ def add_content():
     """添加新内容"""
     try:
         data = request.get_json()
-        title = data.get('title', '').strip()
-        text_content = data.get('text_content', '').strip()
+        title = (data.get('title') or '').strip()
+        send_mode = data.get('send_mode') or 'direct'
+        forum_post_title = (data.get('forum_post_title') or '').strip()
+        forum_tags = normalize_request_forum_tags(data.get('forum_tags', []))
+        text_content = (data.get('text_content') or '').strip()
         image_paths = data.get('image_paths', [])
 
         if not title:
             return jsonify({'success': False, 'error': '标题不能为空'}), 400
 
-        content_id = db.add_content(title=title, text_content=text_content, image_paths=image_paths)
+        content_id = db.add_content(
+            title=title,
+            send_mode=send_mode,
+            forum_post_title=forum_post_title,
+            forum_tags=forum_tags,
+            text_content=text_content,
+            image_paths=image_paths
+        )
         if content_id:
             return jsonify({'success': True, 'id': content_id, 'message': '内容添加成功'})
         return jsonify({'success': False, 'error': '添加内容失败'}), 500
@@ -577,10 +670,21 @@ def update_content(content_id):
     try:
         data = request.get_json()
         title = data.get('title')
+        send_mode = data.get('send_mode')
+        forum_post_title = data.get('forum_post_title')
+        forum_tags = normalize_request_forum_tags(data.get('forum_tags')) if 'forum_tags' in data else None
         text_content = data.get('text_content')
         image_paths = data.get('image_paths')
 
-        if db.update_content(content_id, title=title, text_content=text_content, image_paths=image_paths):
+        if db.update_content(
+            content_id,
+            title=title,
+            send_mode=send_mode,
+            forum_post_title=forum_post_title,
+            forum_tags=forum_tags,
+            text_content=text_content,
+            image_paths=image_paths
+        ):
             return jsonify({'success': True, 'message': '内容更新成功'})
         return jsonify({'success': False, 'error': '更新失败'}), 400
     except Exception as e:
@@ -756,7 +860,14 @@ if __name__ == '__main__':
     # 等待事件循环启动
     time.sleep(1)
 
-    logger.info(f"启动 Flask 服务: {config.FLASK_HOST}:{config.FLASK_PORT}")
+    runtime = get_runtime_snapshot()
+    logger.info(
+        "启动 Flask 服务: %s:%s | Python %s | discord.py-self %s",
+        config.FLASK_HOST,
+        config.FLASK_PORT,
+        runtime['python_version'],
+        runtime['discord_version']
+    )
     app.run(
         host=config.FLASK_HOST,
         port=config.FLASK_PORT,

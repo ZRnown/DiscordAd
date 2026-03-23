@@ -25,11 +25,12 @@ class Config:
 
     # Flask 服务配置
     FLASK_HOST = "127.0.0.1"
-    FLASK_PORT = 5001
+    FLASK_PORT = 5013
     FLASK_DEBUG = False
 
-    # 后端 API URL (用于内部通信)
-    BACKEND_API_URL = f"http://{FLASK_HOST}:{FLASK_PORT}/api"
+    # 后端 URL (用于内部通信)
+    BACKEND_BASE_URL = f"http://{FLASK_HOST}:{FLASK_PORT}"
+    BACKEND_API_URL = f"{BACKEND_BASE_URL}/api"
 
     # 数据存储路径
     APP_NAME = "DiscordAutoSender"

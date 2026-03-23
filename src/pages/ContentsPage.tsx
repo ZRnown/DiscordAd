@@ -1,17 +1,44 @@
 import { useState, useEffect, useRef } from 'react'
 import { toast } from 'sonner'
 import { Plus, Trash2, Edit2, RefreshCw, Image, X, Upload } from 'lucide-react'
+import { API_BASE } from '../lib/api'
+import {
+  ContentSendMode,
+  getContentSendModeMeta
+} from '../lib/contentSendMode'
 
 interface Content {
   id: number
   title: string
+  send_mode?: ContentSendMode
+  forum_post_title?: string | null
+  forum_tags?: string[]
   text_content: string
   image_paths: string[]
   created_at: string
   updated_at: string
 }
 
-const API_BASE = 'http://127.0.0.1:5001/api'
+const parseForumTagsInput = (value: string) => {
+  const rawItems = value.split(/[\n,]+/)
+  const normalizedTags: string[] = []
+  const seen = new Set<string>()
+
+  rawItems.forEach((item) => {
+    const cleanItem = item.trim()
+    if (!cleanItem) {
+      return
+    }
+    const dedupeKey = cleanItem.toLowerCase()
+    if (seen.has(dedupeKey)) {
+      return
+    }
+    seen.add(dedupeKey)
+    normalizedTags.push(cleanItem)
+  })
+
+  return normalizedTags
+}
 
 export default function ContentsPage() {
   const [contents, setContents] = useState<Content[]>([])
@@ -19,6 +46,9 @@ export default function ContentsPage() {
   const [showModal, setShowModal] = useState(false)
   const [editingContent, setEditingContent] = useState<Content | null>(null)
   const [formTitle, setFormTitle] = useState('')
+  const [formSendMode, setFormSendMode] = useState<'direct' | 'post'>('direct')
+  const [formForumPostTitle, setFormForumPostTitle] = useState('')
+  const [formForumTagsText, setFormForumTagsText] = useState('')
   const [formText, setFormText] = useState('')
   const [formImages, setFormImages] = useState<string[]>([])
   const [uploading, setUploading] = useState(false)
@@ -45,6 +75,9 @@ export default function ContentsPage() {
   const openAddModal = () => {
     setEditingContent(null)
     setFormTitle('')
+    setFormSendMode('direct')
+    setFormForumPostTitle('')
+    setFormForumTagsText('')
     setFormText('')
     setFormImages([])
     setShowModal(true)
@@ -53,6 +86,9 @@ export default function ContentsPage() {
   const openEditModal = (content: Content) => {
     setEditingContent(content)
     setFormTitle(content.title)
+    setFormSendMode(content.send_mode === 'post' ? 'post' : 'direct')
+    setFormForumPostTitle(content.forum_post_title || '')
+    setFormForumTagsText((content.forum_tags || []).join('\n'))
     setFormText(content.text_content || '')
     setFormImages(content.image_paths || [])
     setShowModal(true)
@@ -62,6 +98,9 @@ export default function ContentsPage() {
     setShowModal(false)
     setEditingContent(null)
     setFormTitle('')
+    setFormSendMode('direct')
+    setFormForumPostTitle('')
+    setFormForumTagsText('')
     setFormText('')
     setFormImages([])
   }
@@ -72,6 +111,8 @@ export default function ContentsPage() {
       return
     }
 
+    const parsedForumTags = formSendMode === 'post' ? parseForumTagsInput(formForumTagsText) : []
+
     try {
       if (editingContent) {
         // 更新
@@ -80,6 +121,9 @@ export default function ContentsPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             title: formTitle,
+            send_mode: formSendMode,
+            forum_post_title: formForumPostTitle,
+            forum_tags: parsedForumTags,
             text_content: formText,
             image_paths: formImages
           })
@@ -99,6 +143,9 @@ export default function ContentsPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             title: formTitle,
+            send_mode: formSendMode,
+            forum_post_title: formForumPostTitle,
+            forum_tags: parsedForumTags,
             text_content: formText,
             image_paths: formImages
           })
@@ -147,11 +194,15 @@ export default function ContentsPage() {
       }
       // 先创建内容
       try {
+        const parsedForumTags = formSendMode === 'post' ? parseForumTagsInput(formForumTagsText) : []
         const res = await fetch(`${API_BASE}/contents`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             title: formTitle,
+            send_mode: formSendMode,
+            forum_post_title: formForumPostTitle,
+            forum_tags: parsedForumTags,
             text_content: formText,
             image_paths: []
           })
@@ -200,6 +251,8 @@ export default function ContentsPage() {
     setFormImages((prev) => prev.filter((_, i) => i !== index))
   }
 
+  const formSendModeMeta = getContentSendModeMeta(formSendMode)
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -241,52 +294,81 @@ export default function ContentsPage() {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {contents.map((content) => (
-            <div key={content.id} className="bg-white rounded-lg border p-4 hover:shadow-md transition-shadow">
-              <div className="flex items-start justify-between mb-2">
-                <h3 className="font-medium text-gray-800 truncate flex-1">{content.title}</h3>
-                <div className="flex gap-1 ml-2">
-                  <button
-                    onClick={() => openEditModal(content)}
-                    className="p-1 text-gray-400 hover:text-blue-600"
-                    title="编辑"
-                  >
-                    <Edit2 size={16} />
-                  </button>
-                  <button
-                    onClick={() => handleDelete(content.id)}
-                    className="p-1 text-gray-400 hover:text-red-600"
-                    title="删除"
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
-              </div>
-              {content.text_content && (
-                <p className="text-sm text-gray-600 mb-2 line-clamp-3">{content.text_content}</p>
-              )}
-              {content.image_paths && content.image_paths.length > 0 && (
-                <div className="flex gap-1 flex-wrap">
-                  {content.image_paths.slice(0, 4).map((img, idx) => (
-                    <img
-                      key={idx}
-                      src={`${API_BASE}/content_image/${img}`}
-                      alt=""
-                      className="w-12 h-12 object-cover rounded"
-                    />
-                  ))}
-                  {content.image_paths.length > 4 && (
-                    <div className="w-12 h-12 bg-gray-100 rounded flex items-center justify-center text-xs text-gray-500">
-                      +{content.image_paths.length - 4}
+          {contents.map((content) => {
+            const modeMeta = getContentSendModeMeta(content.send_mode)
+
+            return (
+              <div key={content.id} className="bg-white rounded-lg border p-4 hover:shadow-md transition-shadow">
+                <div className="flex items-start justify-between gap-3 mb-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-start gap-2">
+                      <h3 className="font-medium text-gray-800 truncate flex-1">{content.title}</h3>
+                      <span
+                        className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${modeMeta.badgeClass}`}
+                      >
+                        {modeMeta.label}
+                      </span>
                     </div>
-                  )}
+                    <p className="text-xs text-gray-500 mt-1">
+                      目标要求：{modeMeta.targetLabel}
+                    </p>
+                  </div>
+                  <div className="flex gap-1 ml-2">
+                    <button
+                      onClick={() => openEditModal(content)}
+                      className="p-1 text-gray-400 hover:text-blue-600"
+                      title="编辑"
+                    >
+                      <Edit2 size={16} />
+                    </button>
+                    <button
+                      onClick={() => handleDelete(content.id)}
+                      className="p-1 text-gray-400 hover:text-red-600"
+                      title="删除"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
                 </div>
-              )}
-              <p className="text-xs text-gray-400 mt-2">
-                {new Date(content.created_at).toLocaleString()}
-              </p>
-            </div>
-          ))}
+                <p className="text-xs text-gray-500 mb-1">
+                  发送说明：{modeMeta.modeHint}
+                </p>
+                {content.send_mode === 'post' && (
+                  <>
+                    <p className="text-xs text-gray-500 mb-1">
+                      帖子标题：{content.forum_post_title?.trim() || '使用内容标题'}
+                    </p>
+                    <p className="text-xs text-gray-500 mb-2">
+                      帖子标签：{content.forum_tags && content.forum_tags.length > 0 ? content.forum_tags.join('、') : '不设置'}
+                    </p>
+                  </>
+                )}
+                {content.text_content && (
+                  <p className="text-sm text-gray-600 mb-2 line-clamp-3">{content.text_content}</p>
+                )}
+                {content.image_paths && content.image_paths.length > 0 && (
+                  <div className="flex gap-1 flex-wrap">
+                    {content.image_paths.slice(0, 4).map((img, idx) => (
+                      <img
+                        key={idx}
+                        src={`${API_BASE}/content_image/${img}`}
+                        alt=""
+                        className="w-12 h-12 object-cover rounded"
+                      />
+                    ))}
+                    {content.image_paths.length > 4 && (
+                      <div className="w-12 h-12 bg-gray-100 rounded flex items-center justify-center text-xs text-gray-500">
+                        +{content.image_paths.length - 4}
+                      </div>
+                    )}
+                  </div>
+                )}
+                <p className="text-xs text-gray-400 mt-2">
+                  {new Date(content.created_at).toLocaleString()}
+                </p>
+              </div>
+            )
+          })}
         </div>
       )}
 
@@ -315,6 +397,75 @@ export default function ContentsPage() {
                   className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
               </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  发送方式
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setFormSendMode('direct')}
+                    className={`px-3 py-2 rounded-lg border text-sm ${
+                      formSendMode === 'direct'
+                        ? 'bg-blue-50 border-blue-300 text-blue-700'
+                        : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+                    }`}
+                  >
+                    直接发送
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFormSendMode('post')}
+                    className={`px-3 py-2 rounded-lg border text-sm ${
+                      formSendMode === 'post'
+                        ? 'bg-blue-50 border-blue-300 text-blue-700'
+                        : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+                    }`}
+                  >
+                    新建帖子
+                  </button>
+                </div>
+                <div className={`mt-2 rounded-lg border px-3 py-2 text-xs ${formSendModeMeta.panelClass}`}>
+                  <p className="font-medium">当前方式：{formSendModeMeta.label}</p>
+                  <p className="mt-1 leading-5">{formSendModeMeta.targetHint}</p>
+                  <p className="mt-1 leading-5">
+                    {formSendMode === 'post'
+                      ? '帖子标题默认取内容标题，也可以在下面单独设置；帖子标签可留空。'
+                      : '自动发送时目标可以填写普通频道 ID，或者已存在帖子的链接/ID。'}
+                  </p>
+                </div>
+              </div>
+              {formSendMode === 'post' && (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      帖子标题
+                    </label>
+                    <input
+                      type="text"
+                      value={formForumPostTitle}
+                      onChange={(e) => setFormForumPostTitle(e.target.value)}
+                      placeholder="留空则使用内容标题"
+                      className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      帖子标签
+                    </label>
+                    <textarea
+                      value={formForumTagsText}
+                      onChange={(e) => setFormForumTagsText(e.target.value)}
+                      placeholder="可选，填写标签名称或标签 ID，多个用逗号或换行分隔"
+                      rows={3}
+                      className="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    />
+                    <p className="mt-1 text-xs text-gray-500">
+                      留空则不挂标签。如果目标论坛频道设置了必须选择标签，这里至少填一个可用标签。
+                    </p>
+                  </div>
+                </>
+              )}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   文字内容

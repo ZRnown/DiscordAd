@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { toast } from 'sonner'
 import { Plus, Trash2, Power, PowerOff, RefreshCw } from 'lucide-react'
+import { API_BASE } from '../lib/api'
 
 interface Account {
   id: number
@@ -12,14 +13,35 @@ interface Account {
   created_at: string
 }
 
-const API_BASE = 'http://127.0.0.1:5001/api'
-
 export default function AccountsPage() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [loading, setLoading] = useState(true)
   const [showAddModal, setShowAddModal] = useState(false)
   const [newToken, setNewToken] = useState('')
   const [startingAll, setStartingAll] = useState(false)
+
+  const isAccountOnline = (account: Account) => account.is_online
+  const isAccountConnecting = (account: Account) =>
+    !account.is_online && account.status === 'connecting'
+
+  const getStatusMeta = (account: Account) => {
+    if (isAccountOnline(account)) {
+      return {
+        label: '在线',
+        className: 'bg-green-100 text-green-700'
+      }
+    }
+    if (isAccountConnecting(account)) {
+      return {
+        label: '启动中',
+        className: 'bg-amber-100 text-amber-700'
+      }
+    }
+    return {
+      label: '离线',
+      className: 'bg-gray-100 text-gray-600'
+    }
+  }
 
   const fetchAccountsData = async (silent = false) => {
     try {
@@ -95,13 +117,13 @@ export default function AccountsPage() {
     }
   }
 
-  const handleToggleAccount = async (id: number, isOnline: boolean) => {
-    const action = isOnline ? 'stop' : 'start'
+  const handleToggleAccount = async (id: number, isActive: boolean) => {
+    const action = isActive ? 'stop' : 'start'
     try {
       const res = await fetch(`${API_BASE}/accounts/${id}/${action}`, { method: 'POST' })
       const data = await res.json()
       if (data.success) {
-        toast.success(isOnline ? '账号已停止' : '账号启动中...')
+        toast.success(isActive ? '账号已停止' : '账号启动中...')
         setTimeout(fetchAccounts, 1000)
       } else {
         toast.error(data.error || '操作失败')
@@ -113,9 +135,15 @@ export default function AccountsPage() {
 
   const handleStartAllAccounts = async () => {
     setStartingAll(true)
-    const targetIds = accounts.filter((account) => !account.is_online).map((account) => account.id)
+    const targetIds = accounts
+      .filter((account) => !isAccountOnline(account) && !isAccountConnecting(account))
+      .map((account) => account.id)
     if (targetIds.length === 0) {
-      toast.success('所有账号已在线')
+      if (accounts.some((account) => isAccountConnecting(account))) {
+        toast.success('账号启动中，请稍等')
+      } else {
+        toast.success('所有账号已在线')
+      }
       setStartingAll(false)
       return
     }
@@ -241,20 +269,23 @@ export default function AccountsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
-              {accounts.map((account) => (
+              {accounts.map((account) => {
+                const statusMeta = getStatusMeta(account)
+                const isOnline = isAccountOnline(account)
+                const isConnecting = isAccountConnecting(account)
+                const canStart = !isOnline && !isConnecting
+                const canStop = isOnline
+
+                return (
                 <tr key={account.id} className="hover:bg-gray-50">
                   <td className="px-6 py-4 text-sm font-medium text-gray-900">
                     {account.username || `账号 ${account.id}`}
                   </td>
                   <td className="px-6 py-4">
                     <span
-                      className={`inline-flex items-center px-2 py-1 text-xs rounded-full ${
-                        account.is_online
-                          ? 'bg-green-100 text-green-700'
-                          : 'bg-gray-100 text-gray-600'
-                      }`}
+                      className={`inline-flex items-center px-2 py-1 text-xs rounded-full ${statusMeta.className}`}
                     >
-                      {account.is_online ? '在线' : '离线'}
+                      {statusMeta.label}
                     </span>
                   </td>
                   <td className="px-6 py-4 text-sm text-gray-500 font-mono">
@@ -265,15 +296,24 @@ export default function AccountsPage() {
                   </td>
                   <td className="px-6 py-4 text-right space-x-2">
                     <button
-                      onClick={() => handleToggleAccount(account.id, account.is_online)}
+                      onClick={() => {
+                        if (canStop) {
+                          handleToggleAccount(account.id, true)
+                        } else if (canStart) {
+                          handleToggleAccount(account.id, false)
+                        }
+                      }}
+                      disabled={isConnecting}
                       className={`p-2 rounded-lg ${
-                        account.is_online
+                        canStop
                           ? 'text-red-600 hover:bg-red-50'
-                          : 'text-green-600 hover:bg-green-50'
+                          : canStart
+                            ? 'text-green-600 hover:bg-green-50'
+                            : 'text-amber-500 cursor-not-allowed'
                       }`}
-                      title={account.is_online ? '停止' : '启动'}
+                      title={canStop ? '停止' : isConnecting ? '启动中' : '启动'}
                     >
-                      {account.is_online ? <PowerOff size={18} /> : <Power size={18} />}
+                      {canStop ? <PowerOff size={18} /> : <Power size={18} />}
                     </button>
                     <button
                       onClick={() => handleDeleteAccount(account.id)}
@@ -284,7 +324,8 @@ export default function AccountsPage() {
                     </button>
                   </td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         </div>
