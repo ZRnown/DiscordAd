@@ -1,0 +1,10 @@
+- generic [ref=e2]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - heading "软件激活" [level=1] [ref=e6]
+      - paragraph [ref=e7]: 请输入许可证密钥以继续使用。
+    - generic [ref=e8]:
+      - generic [ref=e9]: 许可证密钥
+      - textbox "请输入许可证密钥" [ref=e10]
+    - button "激活" [ref=e11] [cursor=pointer]
+  - region "Notifications alt+T"

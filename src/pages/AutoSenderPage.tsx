@@ -5,7 +5,8 @@ import { API_BASE } from '../lib/api'
 import {
   ContentSendMode,
   getContentSendModeMeta,
-  normalizeContentSendMode
+  normalizeContentSendMode,
+  normalizeForumTags
 } from '../lib/contentSendMode'
 
 interface Content {
@@ -113,7 +114,12 @@ export default function AutoSenderPage() {
       const logsData = await logsRes.json()
 
       if (contentsData.success) {
-        setContents(contentsData.contents || [])
+        setContents(
+          (contentsData.contents || []).map((content: Content) => ({
+            ...content,
+            forum_tags: normalizeForumTags(content.forum_tags)
+          }))
+        )
       }
       if (accountsData.success) {
         // 只显示在线账号（不再要求配置频道）
@@ -409,7 +415,7 @@ export default function AutoSenderPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* 左侧：内容选择 */}
-        <div className="bg-white rounded-lg border p-6">
+        <div className="bg-white rounded-lg border p-6 min-h-[720px] flex flex-col">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-bold text-gray-800">选择内容</h3>
             <button
@@ -428,14 +434,16 @@ export default function AutoSenderPage() {
           </p>
 
           {contents.length === 0 ? (
-            <div className="text-center py-8 text-gray-500">
+            <div className="flex-1 flex items-center justify-center text-center text-gray-500">
               暂无内容，请先在内容管理页面添加
             </div>
           ) : (
-            <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+            <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+              <div className="space-y-3">
               {contents.map((content) => {
                 const modeMeta = getContentSendModeMeta(content.send_mode)
                 const customPostTitle = content.forum_post_title?.trim()
+                const forumTags = normalizeForumTags(content.forum_tags)
 
                 return (
                   <div
@@ -463,16 +471,13 @@ export default function AutoSenderPage() {
                           {modeMeta.label}
                         </span>
                       </div>
-                      <span className="text-xs text-gray-500 block mt-2 leading-5">
-                        目标要求：{modeMeta.targetLabel}
-                      </span>
                       {normalizeContentSendMode(content.send_mode) === 'post' && (
                         <>
                           <span className="text-xs text-gray-500 block mt-1 leading-5">
                             帖子标题：{customPostTitle || '使用内容标题'}
                           </span>
                           <span className="text-xs text-gray-500 block mt-1 leading-5">
-                            帖子标签：{content.forum_tags && content.forum_tags.length > 0 ? content.forum_tags.join('、') : '不设置'}
+                            帖子标签：{forumTags.length > 0 ? forumTags.join('、') : '不设置'}
                           </span>
                         </>
                       )}
@@ -485,6 +490,7 @@ export default function AutoSenderPage() {
                   </div>
                 )
               })}
+              </div>
             </div>
           )}
         </div>
@@ -637,7 +643,7 @@ export default function AutoSenderPage() {
         </div>
 
         {/* 右侧：账号选择 */}
-        <div className="bg-white rounded-lg border p-6">
+        <div className="bg-white rounded-lg border p-6 min-h-[720px] flex flex-col">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-bold text-gray-800">选择账号</h3>
             {rotationMode && (
@@ -653,34 +659,36 @@ export default function AutoSenderPage() {
           </div>
 
           {accounts.length === 0 ? (
-            <div className="text-center py-8 text-gray-500">
+            <div className="flex-1 flex items-center justify-center text-center text-gray-500">
               暂无可用账号，请先启动账号
             </div>
           ) : (
-            <div className="space-y-2 max-h-[300px] overflow-y-auto">
+            <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+              <div className="space-y-3">
               {accounts.map((account) => (
                 <div
                   key={account.id}
                   onClick={() => !(isRunning || isPaused) && toggleAccount(account.id)}
-                  className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-colors ${
+                  className={`flex items-start gap-3 p-4 min-h-[84px] rounded-lg cursor-pointer transition-colors ${
                     selectedAccounts.includes(account.id)
                       ? 'bg-blue-50 border-blue-200 border'
                       : 'bg-gray-50 hover:bg-gray-100'
                   } ${isRunning || isPaused ? 'opacity-50 cursor-not-allowed' : ''}`}
                 >
                   {selectedAccounts.includes(account.id) ? (
-                    <CheckCircle size={20} className="text-blue-600 flex-shrink-0" />
+                    <CheckCircle size={20} className="text-blue-600 flex-shrink-0 mt-1" />
                   ) : (
-                    <Circle size={20} className="text-gray-400 flex-shrink-0" />
+                    <Circle size={20} className="text-gray-400 flex-shrink-0 mt-1" />
                   )}
-                  <div className="flex-1">
-                    <span className="font-medium text-gray-800">
+                  <div className="flex-1 min-w-0">
+                    <span className="font-medium text-gray-800 block leading-6">
                       {account.username || `账号 ${account.id}`}
                     </span>
-                    <span className="ml-2 text-xs text-green-600">在线</span>
+                    <span className="text-xs text-green-600 block mt-1">在线</span>
                   </div>
                 </div>
               ))}
+              </div>
             </div>
           )}
         </div>

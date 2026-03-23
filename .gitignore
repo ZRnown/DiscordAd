@@ -25,6 +25,8 @@ wheels/
 *.egg
 venv/
 .venv/
+!src/lib/
+!src/lib/*.ts
 
 # Tauri
 src-tauri/target/

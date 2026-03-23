@@ -4,7 +4,8 @@ import { Plus, Trash2, Edit2, RefreshCw, Image, X, Upload } from 'lucide-react'
 import { API_BASE } from '../lib/api'
 import {
   ContentSendMode,
-  getContentSendModeMeta
+  getContentSendModeMeta,
+  normalizeForumTags
 } from '../lib/contentSendMode'
 
 interface Content {
@@ -59,7 +60,12 @@ export default function ContentsPage() {
       const res = await fetch(`${API_BASE}/contents`)
       const data = await res.json()
       if (data.success) {
-        setContents(data.contents || [])
+        setContents(
+          (data.contents || []).map((content: Content) => ({
+            ...content,
+            forum_tags: normalizeForumTags(content.forum_tags)
+          }))
+        )
       }
     } catch (error) {
       toast.error('获取内容列表失败')
@@ -88,7 +94,7 @@ export default function ContentsPage() {
     setFormTitle(content.title)
     setFormSendMode(content.send_mode === 'post' ? 'post' : 'direct')
     setFormForumPostTitle(content.forum_post_title || '')
-    setFormForumTagsText((content.forum_tags || []).join('\n'))
+    setFormForumTagsText(normalizeForumTags(content.forum_tags).join('\n'))
     setFormText(content.text_content || '')
     setFormImages(content.image_paths || [])
     setShowModal(true)
@@ -296,6 +302,7 @@ export default function ContentsPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {contents.map((content) => {
             const modeMeta = getContentSendModeMeta(content.send_mode)
+            const forumTags = normalizeForumTags(content.forum_tags)
 
             return (
               <div key={content.id} className="bg-white rounded-lg border p-4 hover:shadow-md transition-shadow">
@@ -309,9 +316,6 @@ export default function ContentsPage() {
                         {modeMeta.label}
                       </span>
                     </div>
-                    <p className="text-xs text-gray-500 mt-1">
-                      目标要求：{modeMeta.targetLabel}
-                    </p>
                   </div>
                   <div className="flex gap-1 ml-2">
                     <button
@@ -339,7 +343,7 @@ export default function ContentsPage() {
                       帖子标题：{content.forum_post_title?.trim() || '使用内容标题'}
                     </p>
                     <p className="text-xs text-gray-500 mb-2">
-                      帖子标签：{content.forum_tags && content.forum_tags.length > 0 ? content.forum_tags.join('、') : '不设置'}
+                      帖子标签：{forumTags.length > 0 ? forumTags.join('、') : '不设置'}
                     </p>
                   </>
                 )}
