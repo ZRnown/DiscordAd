@@ -43,8 +43,14 @@ pip install -r requirements.txt
 cd backend
 python app.py
 
-# 启动前端 (终端2)
-npm run tauri dev
+# 启动桌面端开发模式 (终端2)
+npm run tauri:dev
+```
+
+如果只调试前端页面，也可以直接运行：
+
+```bash
+npm run dev
 ```
 
 ## 构建
@@ -57,7 +63,7 @@ cd backend
 pyinstaller --onefile --name backend app.py
 
 # 构建 Tauri 应用
-npm run tauri build
+npm run tauri:build
 ```
 
 ### GitHub Actions 构建

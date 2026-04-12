@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Discord 自动营销机器人系统",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
