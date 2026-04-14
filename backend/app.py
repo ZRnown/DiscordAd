@@ -119,6 +119,10 @@ def activate_license_api():
     """激活许可证"""
     try:
         data = request.get_json() or {}
+        if not getattr(config, 'LICENSE_REQUIRED', True):
+            success, result = activate_license('')
+            return jsonify({'success': success, **result})
+
         license_key = data.get('key', '').strip()
         if not license_key:
             return jsonify({'success': False, 'error': '请输入许可证密钥'}), 400

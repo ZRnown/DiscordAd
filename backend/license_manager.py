@@ -125,7 +125,24 @@ def _parse_datetime(value: Optional[str]) -> Optional[dt.datetime]:
         return None
 
 
+def _is_license_required() -> bool:
+    return bool(getattr(config, 'LICENSE_REQUIRED', True))
+
+
+def _build_free_license_payload() -> Dict[str, Any]:
+    return {
+        'mode': 'free',
+        'license_key': '',
+        'days': -1,
+        'activated_at': None,
+        'expires_at': None
+    }
+
+
 def validate_local_license() -> Tuple[bool, Dict[str, Any]]:
+    if not _is_license_required():
+        return True, _build_free_license_payload()
+
     data = load_license()
     if not data:
         return False, {'reason': 'missing', 'message': '未找到许可证，请先激活'}
@@ -157,6 +174,13 @@ def validate_local_license() -> Tuple[bool, Dict[str, Any]]:
 
 
 def activate_license(license_key: str) -> Tuple[bool, Dict[str, Any]]:
+    if not _is_license_required():
+        return True, {
+            'message': '当前版本无需激活',
+            'days': -1,
+            'mode': 'free'
+        }
+
     normalized_key = license_key.strip().upper()
     if config.LICENSE_ALLOW_TEST_KEYS:
         allowed = {key.upper() for key in config.LICENSE_TEST_KEYS}

@@ -68,6 +68,7 @@ class Config:
     AUTO_SENDER_IMAGE_TIMEOUT = 60  # 单次图片发送超时（秒）
 
     # 许可证激活服务配置
+    LICENSE_REQUIRED = False
     LICENSE_SERVER_URL = "http://107.172.1.7:8888"
     LICENSE_ALLOW_TEST_KEYS = True
     LICENSE_TEST_KEYS = [

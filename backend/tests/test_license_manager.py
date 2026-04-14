@@ -53,3 +53,15 @@ class LicenseManagerDeviceIdTests(unittest.TestCase):
         self.assertTrue(self.device_id_file.exists())
         self.assertEqual(self.device_id_file.read_text(encoding='utf-8').strip(), saved_hwid)
 
+    def test_validate_local_license_allows_free_mode_without_saved_license(self):
+        original_required = getattr(license_manager.config, 'LICENSE_REQUIRED', True)
+        license_manager.config.LICENSE_REQUIRED = False
+
+        try:
+            activated, payload = license_manager.validate_local_license()
+        finally:
+            license_manager.config.LICENSE_REQUIRED = original_required
+
+        self.assertTrue(activated)
+        self.assertEqual(payload['mode'], 'free')
+        self.assertEqual(payload['days'], -1)

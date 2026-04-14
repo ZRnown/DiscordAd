@@ -1,4 +1,3 @@
-import { useEffect, useState, type ReactNode } from 'react'
 import { HashRouter, Routes, Route, NavLink } from 'react-router-dom'
 import { Toaster } from 'sonner'
 import { Users, FileText, Send } from 'lucide-react'
@@ -6,64 +5,10 @@ import { Users, FileText, Send } from 'lucide-react'
 import AccountsPage from './pages/AccountsPage'
 import ContentsPage from './pages/ContentsPage'
 import AutoSenderPage from './pages/AutoSenderPage'
-import LicenseGate from './components/LicenseGate'
-import { API_BASE } from './lib/api'
-
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('timeout')), ms)
-    promise
-      .then((value) => {
-        clearTimeout(timer)
-        resolve(value)
-      })
-      .catch((error) => {
-        clearTimeout(timer)
-        reject(error)
-      })
-  })
-}
 
 function App() {
-  const [licenseActive, setLicenseActive] = useState(
-    () => localStorage.getItem('licenseActivated') === 'true'
-  )
-
-  const checkServerAndLicense = async () => {
-    try {
-      const healthRes = await withTimeout(fetch(`${API_BASE}/health`, { method: 'GET' }), 5000)
-      if (!healthRes.ok) {
-        throw new Error('Backend not ready')
-      }
-
-      const res = await withTimeout(fetch(`${API_BASE}/license/status`), 5000)
-      const data = await res.json()
-      if (data.success && data.activated) {
-        if (!licenseActive) {
-          setLicenseActive(true)
-          localStorage.setItem('licenseActivated', 'true')
-        }
-      } else if (data.success && !data.activated && licenseActive) {
-        setLicenseActive(false)
-        localStorage.removeItem('licenseActivated')
-      }
-    } catch (error) {
-    }
-  }
-
-  useEffect(() => {
-    checkServerAndLicense()
-    const timer = setInterval(() => {
-      checkServerAndLicense()
-    }, 3000)
-    return () => clearInterval(timer)
-  }, [licenseActive])
-
-  let content: ReactNode
-  if (!licenseActive) {
-    content = <LicenseGate onActivated={checkServerAndLicense} />
-  } else {
-    content = (
+  return (
+    <>
       <HashRouter>
         <div className="flex min-h-screen bg-gray-50">
           {/* 侧边栏 */}
@@ -138,12 +83,6 @@ function App() {
           </main>
         </div>
       </HashRouter>
-    )
-  }
-
-  return (
-    <>
-      {content}
       <Toaster position="top-right" richColors />
     </>
   )
