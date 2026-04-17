@@ -15,6 +15,7 @@ import sqlite3
 import os
 import json
 import sys
+import shutil
 from datetime import datetime
 from collections import deque
 from typing import Dict, List, Optional
@@ -198,6 +199,46 @@ def list_logs():
 def stream_logs():
     """日志流占位（兼容旧前端）"""
     return list_logs()
+
+
+# ============== 数据目录 API ==============
+
+@app.route('/api/storage', methods=['GET'])
+def get_storage():
+    """获取当前数据目录配置"""
+    try:
+        return jsonify({'success': True, **get_storage_payload()})
+    except Exception as e:
+        logger.error(f"获取数据目录配置失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/storage', methods=['POST'])
+def update_storage():
+    """更新数据目录，可选迁移现有数据"""
+    try:
+        task_status = get_task_status()
+        if task_status.get('is_running') or task_status.get('is_paused'):
+            return jsonify({'success': False, 'error': '请先停止自动发送任务，再切换数据目录'}), 409
+
+        data = request.get_json() or {}
+        target_dir = str(data.get('data_dir') or '').strip()
+        migrate = bool(data.get('migrate', True))
+
+        if not target_dir:
+            return jsonify({'success': False, 'error': '数据目录不能为空'}), 400
+
+        payload = switch_storage_dir(target_dir, migrate=migrate)
+        return jsonify({
+            'success': True,
+            'message': '数据目录已更新',
+            **payload
+        })
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"更新数据目录失败: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 def fetch_discord_username(token: str) -> str:
@@ -570,11 +611,78 @@ def bot_cooldowns():
 
 # ============== 内容管理 API ==============
 
-# 内容图片存储目录
-CONTENT_IMAGES_DIR = os.path.join(config.DATA_DIR, 'content_images')
-os.makedirs(CONTENT_IMAGES_DIR, exist_ok=True)
-
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+
+
+def get_content_images_dir() -> str:
+    content_images_dir = os.path.join(config.DATA_DIR, 'content_images')
+    os.makedirs(content_images_dir, exist_ok=True)
+    return content_images_dir
+
+
+def get_storage_payload() -> Dict[str, str]:
+    return {
+        'data_dir': config.DATA_DIR,
+        'default_data_dir': config.DEFAULT_DATA_DIR,
+        'database_path': config.DATABASE_PATH,
+        'content_images_dir': get_content_images_dir(),
+        'storage_config_path': config.STORAGE_CONFIG_PATH
+    }
+
+
+def _validate_storage_target_dir(source_dir: str, target_dir: str) -> None:
+    source_real = os.path.realpath(source_dir)
+    target_real = os.path.realpath(target_dir)
+
+    if source_real == target_real:
+        return
+
+    shared_root = os.path.commonpath([source_real, target_real])
+    if shared_root in {source_real, target_real}:
+        raise ValueError('新目录不能和当前数据目录互相包含')
+
+
+def _copy_tree(source_dir: str, target_dir: str) -> None:
+    os.makedirs(target_dir, exist_ok=True)
+    for entry in os.listdir(source_dir):
+        source_path = os.path.join(source_dir, entry)
+        target_path = os.path.join(target_dir, entry)
+        if entry in {'metadata.db', 'metadata.db-shm', 'metadata.db-wal'}:
+            continue
+        if os.path.isdir(source_path):
+            shutil.copytree(source_path, target_path, dirs_exist_ok=True)
+        elif os.path.isfile(source_path):
+            shutil.copy2(source_path, target_path)
+
+
+def _copy_database(source_db_path: str, target_db_path: str) -> None:
+    if not os.path.exists(source_db_path):
+        return
+
+    os.makedirs(os.path.dirname(target_db_path), exist_ok=True)
+    with sqlite3.connect(source_db_path) as source_conn:
+        with sqlite3.connect(target_db_path) as target_conn:
+            source_conn.backup(target_conn)
+
+
+def switch_storage_dir(target_dir: str, migrate: bool = True) -> Dict[str, str]:
+    global db
+
+    source_dir = config.DATA_DIR
+    source_db_path = config.DATABASE_PATH
+    normalized_target_dir = config.set_data_dir(target_dir, persist=False)
+    config.set_data_dir(source_dir, persist=False)
+
+    _validate_storage_target_dir(source_dir, normalized_target_dir)
+
+    if migrate:
+        _copy_tree(source_dir, normalized_target_dir)
+        _copy_database(source_db_path, os.path.join(normalized_target_dir, 'metadata.db'))
+
+    config.set_data_dir(normalized_target_dir, persist=True)
+    db = Database()
+    load_task_state(db)
+    return get_storage_payload()
 
 
 def allowed_file(filename):
@@ -703,8 +811,9 @@ def delete_content(content_id):
         # 获取内容信息以删除关联的图片
         content = db.get_content_by_id(content_id)
         if content and content.get('image_paths'):
+            content_images_dir = get_content_images_dir()
             for img_path in content['image_paths']:
-                full_path = os.path.join(CONTENT_IMAGES_DIR, img_path)
+                full_path = os.path.join(content_images_dir, img_path)
                 if os.path.exists(full_path):
                     try:
                         os.remove(full_path)
@@ -735,7 +844,7 @@ def upload_content_image(content_id):
             import uuid
             ext = file.filename.rsplit('.', 1)[1].lower()
             filename = f"{content_id}_{uuid.uuid4().hex[:8]}.{ext}"
-            filepath = os.path.join(CONTENT_IMAGES_DIR, filename)
+            filepath = os.path.join(get_content_images_dir(), filename)
             file.save(filepath)
 
             # 更新内容的图片列表
@@ -760,7 +869,7 @@ def upload_content_image(content_id):
 def get_content_image(filename):
     """获取内容图片"""
     try:
-        filepath = os.path.join(CONTENT_IMAGES_DIR, secure_filename(filename))
+        filepath = os.path.join(get_content_images_dir(), secure_filename(filename))
         if os.path.exists(filepath):
             return send_file(filepath)
         return jsonify({'success': False, 'error': '图片不存在'}), 404

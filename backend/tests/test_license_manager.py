@@ -17,18 +17,14 @@ class LicenseManagerDeviceIdTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.license_file = Path(self.tmpdir.name) / 'license.json'
         self.device_id_file = Path(self.tmpdir.name) / 'device_id.txt'
-        self.original_license_file = license_manager.LICENSE_FILE
-        self.had_device_id_attr = hasattr(license_manager, 'DEVICE_ID_FILE')
-        self.original_device_id_file = getattr(license_manager, 'DEVICE_ID_FILE', None)
-        license_manager.LICENSE_FILE = str(self.license_file)
-        license_manager.DEVICE_ID_FILE = str(self.device_id_file)
+        self.original_get_license_file = license_manager.get_license_file
+        self.original_get_device_id_file = license_manager.get_device_id_file
+        license_manager.get_license_file = lambda: str(self.license_file)
+        license_manager.get_device_id_file = lambda: str(self.device_id_file)
 
     def tearDown(self):
-        license_manager.LICENSE_FILE = self.original_license_file
-        if self.had_device_id_attr:
-            license_manager.DEVICE_ID_FILE = self.original_device_id_file
-        else:
-            delattr(license_manager, 'DEVICE_ID_FILE')
+        license_manager.get_license_file = self.original_get_license_file
+        license_manager.get_device_id_file = self.original_get_device_id_file
         self.tmpdir.cleanup()
 
     def test_generate_hwid_prefers_cached_device_id(self):

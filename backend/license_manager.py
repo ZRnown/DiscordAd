@@ -11,8 +11,13 @@ import requests
 
 from config import config
 
-LICENSE_FILE = os.path.join(config.DATA_DIR, 'license.json')
-DEVICE_ID_FILE = os.path.join(config.DATA_DIR, 'device_id.txt')
+
+def get_license_file() -> str:
+    return os.path.join(config.DATA_DIR, 'license.json')
+
+
+def get_device_id_file() -> str:
+    return os.path.join(config.DATA_DIR, 'device_id.txt')
 
 
 def _normalize_hwid(value: Optional[str]) -> str:
@@ -24,7 +29,7 @@ def _normalize_hwid(value: Optional[str]) -> str:
 
 def _load_cached_hwid() -> str:
     try:
-        with open(DEVICE_ID_FILE, 'r', encoding='utf-8') as f:
+        with open(get_device_id_file(), 'r', encoding='utf-8') as f:
             return _normalize_hwid(f.read())
     except FileNotFoundError:
         return ''
@@ -38,8 +43,9 @@ def _save_cached_hwid(hwid: str) -> bool:
         return False
 
     try:
-        os.makedirs(os.path.dirname(DEVICE_ID_FILE), exist_ok=True)
-        with open(DEVICE_ID_FILE, 'w', encoding='utf-8') as f:
+        device_id_file = get_device_id_file()
+        os.makedirs(os.path.dirname(device_id_file), exist_ok=True)
+        with open(device_id_file, 'w', encoding='utf-8') as f:
             f.write(normalized)
         return True
     except Exception:
@@ -76,12 +82,12 @@ def generate_hwid() -> str:
 
 
 def _ensure_data_dir() -> None:
-    os.makedirs(os.path.dirname(LICENSE_FILE), exist_ok=True)
+    os.makedirs(config.DATA_DIR, exist_ok=True)
 
 
 def load_license() -> Optional[Dict[str, Any]]:
     try:
-        with open(LICENSE_FILE, 'r', encoding='utf-8') as f:
+        with open(get_license_file(), 'r', encoding='utf-8') as f:
             return json.load(f)
     except FileNotFoundError:
         return None
@@ -92,7 +98,7 @@ def load_license() -> Optional[Dict[str, Any]]:
 def save_license(data: Dict[str, Any]) -> bool:
     try:
         _ensure_data_dir()
-        with open(LICENSE_FILE, 'w', encoding='utf-8') as f:
+        with open(get_license_file(), 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=True, indent=2)
         return True
     except Exception:
@@ -101,8 +107,9 @@ def save_license(data: Dict[str, Any]) -> bool:
 
 def clear_license() -> bool:
     try:
-        if os.path.exists(LICENSE_FILE):
-            os.remove(LICENSE_FILE)
+        license_file = get_license_file()
+        if os.path.exists(license_file):
+            os.remove(license_file)
         return True
     except Exception:
         return False

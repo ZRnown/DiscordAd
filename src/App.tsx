@@ -1,10 +1,11 @@
 import { HashRouter, Routes, Route, NavLink } from 'react-router-dom'
 import { Toaster } from 'sonner'
-import { Users, FileText, Send } from 'lucide-react'
+import { Users, FileText, Send, FolderCog } from 'lucide-react'
 
 import AccountsPage from './pages/AccountsPage'
 import ContentsPage from './pages/ContentsPage'
 import AutoSenderPage from './pages/AutoSenderPage'
+import SettingsPage from './pages/SettingsPage'
 
 function App() {
   return (
@@ -64,6 +65,21 @@ function App() {
                   <span>内容管理</span>
                 </NavLink>
               </li>
+              <li>
+                <NavLink
+                  to="/settings"
+                  className={({ isActive }) =>
+                    `flex items-center gap-3 px-4 py-2 rounded-lg transition-colors ${
+                      isActive
+                        ? 'bg-blue-50 text-blue-600'
+                        : 'text-gray-600 hover:bg-gray-100'
+                    }`
+                  }
+                >
+                  <FolderCog size={20} />
+                  <span>数据设置</span>
+                </NavLink>
+              </li>
             </ul>
 
             <div className="mt-6 text-xs text-gray-500 space-y-1 text-center flex flex-col items-center">
@@ -79,6 +95,7 @@ function App() {
               <Route path="/" element={<AutoSenderPage />} />
               <Route path="/accounts" element={<AccountsPage />} />
               <Route path="/contents" element={<ContentsPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
             </Routes>
           </main>
         </div>
