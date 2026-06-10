@@ -34,7 +34,7 @@
         "icons/icon.icns",
         "icons/icon.ico"
       ],
-      "identifier": "com.zrnown.discordmarketing",
+      "identifier": "com.discordmarketing.app",
       "longDescription": "",
       "macOS": {
         "entitlements": null,

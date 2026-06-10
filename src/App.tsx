@@ -82,11 +82,6 @@ function App() {
               </li>
             </ul>
 
-            <div className="mt-6 text-xs text-gray-500 space-y-1 text-center flex flex-col items-center">
-              <p className="text-gray-700 font-medium">技术支持</p>
-              <p>微信: OceanSeaWang</p>
-              <p>Discord: zrnown</p>
-            </div>
           </nav>
 
           {/* 主内容区 */}
